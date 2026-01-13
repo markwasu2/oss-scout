@@ -1,6 +1,21 @@
 {
   "_comment": "Manual tag overrides for projects. Key format: 'github:owner/repo' or 'huggingface:org/model'",
-  "_example": "github:comfyanonymous/ComfyUI",
-  "_tags_example": ["comfyui", "node-graph", "ui", "image", "video"]
+  "_format": "Tags will be ADDED to existing auto-detected tags (union, not replace)",
+  
+  "_examples": {
+    "github:comfyanonymous/ComfyUI": ["comfyui", "node-graph", "ui", "inference", "image", "video", "plugin"],
+    "github:lllyasviel/ControlNet": ["controlnet", "conditioning", "diffusers", "i2i", "image", "pose-depth"],
+    "huggingface:stabilityai/stable-diffusion-xl-base-1.0": ["sdxl", "t2i", "image", "diffusion", "permissive"]
+  },
+  
+  "_available_tags": {
+    "modality": ["image", "video", "audio", "3d", "multimodal"],
+    "task": ["t2i", "i2i", "t2v", "i2v", "tts", "asr"],
+    "ecosystem": ["diffusers", "comfyui", "automatic1111", "sdxl", "kohya", "pytorch", "jax", "onnx"],
+    "control": ["controlnet", "pose-depth", "motion-control", "inpainting", "lora"],
+    "pipeline": ["training", "inference", "eval", "dataset", "ui", "plugin"],
+    "license": ["permissive", "restricted", "unclear-license"],
+    "extras": ["diffusion", "transformer", "gan", "flow", "realtime", "on-device", "agents", "rag", "nodes"]
+  }
 }
 

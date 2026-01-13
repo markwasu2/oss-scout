@@ -1,0 +1,13 @@
+{
+  "_comment": "Projects to exclude from the feed. Use full_name format.",
+  "_format": "Array of strings: ['owner/repo', 'org/model']",
+  
+  "github": [
+    "_comment: Add GitHub repos to exclude (e.g., 'example-org/tutorial-repo')"
+  ],
+  
+  "huggingface": [
+    "_comment: Add HF models to exclude (e.g., 'org/test-model')"
+  ]
+}
+
