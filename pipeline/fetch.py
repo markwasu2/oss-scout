@@ -14,6 +14,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 HEALTH_CACHE_PATH = Path("data/cache/github_health.json")
+METRICS_SNAPSHOT_PATH = Path("data/cache/metrics_snapshot.json")
 CACHE_TTL_HOURS = 12
 
 def load_config():
@@ -51,6 +52,22 @@ def save_health_cache(cache):
     with open(HEALTH_CACHE_PATH, 'w') as f:
         json.dump(cache, f, indent=2)
 
+def load_metrics_snapshot():
+    """Load previous metrics snapshot for momentum calculation"""
+    if not METRICS_SNAPSHOT_PATH.exists():
+        return {}
+    try:
+        with open(METRICS_SNAPSHOT_PATH) as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_metrics_snapshot(snapshot):
+    """Save current metrics snapshot for next run"""
+    METRICS_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(METRICS_SNAPSHOT_PATH, 'w') as f:
+        json.dump(snapshot, f, indent=2)
+
 def is_cache_valid(cached_entry):
     """Check if cached entry is still valid (< 12 hours old)"""
     if not cached_entry or 'fetched_at' not in cached_entry:
@@ -73,6 +90,55 @@ def clamp(value, min_val=0, max_val=1):
     """Clamp value between min and max"""
     return max(min_val, min(max_val, value))
 
+def compute_momentum(current_metrics, previous_metrics):
+    """
+    Compute momentum score and label from deltas
+    Returns dict with stars_delta, downloads_delta, likes_delta, momentum_score, momentum_label
+    """
+    deltas = {
+        'stars_delta': current_metrics.get('stars', 0) - previous_metrics.get('stars', 0),
+        'forks_delta': current_metrics.get('forks', 0) - previous_metrics.get('forks', 0),
+        'downloads_delta': current_metrics.get('downloads', 0) - previous_metrics.get('downloads', 0),
+        'likes_delta': current_metrics.get('likes', 0) - previous_metrics.get('likes', 0),
+    }
+    
+    # Compute momentum score (0-1) based on relative growth
+    # Use log1p to handle large deltas gracefully
+    if current_metrics.get('stars', 0) > 0:
+        stars_momentum = log1p(abs(deltas['stars_delta'])) / log1p(max(1, current_metrics.get('stars', 1)))
+    else:
+        stars_momentum = 0
+    
+    if current_metrics.get('downloads', 0) > 0:
+        downloads_momentum = log1p(abs(deltas['downloads_delta'])) / log1p(max(1, current_metrics.get('downloads', 1)))
+    else:
+        downloads_momentum = 0
+    
+    if current_metrics.get('likes', 0) > 0:
+        likes_momentum = log1p(abs(deltas['likes_delta'])) / log1p(max(1, current_metrics.get('likes', 1)))
+    else:
+        likes_momentum = 0
+    
+    # Weighted average (GitHub: stars+forks, HF: downloads+likes)
+    if current_metrics.get('source') == 'github':
+        momentum_score = clamp(stars_momentum * 100)
+    else:  # HuggingFace
+        momentum_score = clamp((downloads_momentum * 0.7 + likes_momentum * 0.3) * 100)
+    
+    # Label based on score
+    if momentum_score >= 5:
+        momentum_label = 'rising'
+    elif momentum_score >= 1:
+        momentum_label = 'steady'
+    else:
+        momentum_label = 'flat'
+    
+    return {
+        **deltas,
+        'momentum_score': momentum_score,
+        'momentum_label': momentum_label
+    }
+
 def extract_tags(text, topics, license_info=None):
     """
     Extract practical tags for filtering (modality, task, ecosystem, control, pipeline, license)
@@ -83,30 +149,42 @@ def extract_tags(text, topics, license_info=None):
     tags = []
     
     # 1. MODALITY (what type of content)
-    if any(kw in all_topics for kw in ["image", "img", "vision", "visual", "picture", "photo"]):
+    if any(kw in all_topics for kw in ["image", "img", "vision", "visual", "picture", "photo", "t2i", "i2i"]):
         tags.append("image")
-    if any(kw in all_topics for kw in ["video", "vid", "motion", "animation", "clip"]):
+    if any(kw in all_topics for kw in ["video", "vid", "motion", "animation", "clip", "t2v", "i2v", "v2v"]):
         tags.append("video")
-    if any(kw in all_topics for kw in ["audio", "sound", "music", "speech", "voice", "tts", "asr"]):
+    if any(kw in all_topics for kw in ["audio", "sound", "music", "speech", "voice", "tts", "asr", "sts"]):
         tags.append("audio")
-    if any(kw in all_topics for kw in ["3d", "nerf", "gaussian-splatting", "3dgs", "mesh", "point-cloud"]):
+    if any(kw in all_topics for kw in ["3d", "nerf", "gaussian-splatting", "3dgs", "mesh", "point-cloud", "3d-reconstruction"]):
         tags.append("3d")
-    if any(kw in all_topics for kw in ["multimodal", "multi-modal", "vision-language", "vlm"]):
+    if any(kw in all_topics for kw in ["multimodal", "multi-modal", "vision-language", "vlm", "vision-text"]):
         tags.append("multimodal")
+    if any(kw in all_topics for kw in ["world-model", "world model", "simulation", "environment", "physics", "embodied"]):
+        tags.append("world")
     
     # 2. TASK (generation tasks that show up everywhere)
-    if any(kw in all_topics for kw in ["text-to-image", "t2i", "text2image"]):
+    if any(kw in all_topics for kw in ["text-to-image", "t2i", "text2image", "txt2img"]):
         tags.append("t2i")
-    if any(kw in all_topics for kw in ["image-to-image", "i2i", "img2img", "edit", "inpaint", "upscale", "super-resolution"]):
+    if any(kw in all_topics for kw in ["image-to-image", "i2i", "img2img", "image-editing"]):
         tags.append("i2i")
-    if any(kw in all_topics for kw in ["text-to-video", "t2v", "text2video"]):
+    if any(kw in all_topics for kw in ["text-to-video", "t2v", "text2video", "txt2vid"]):
         tags.append("t2v")
-    if any(kw in all_topics for kw in ["image-to-video", "i2v", "img2video", "animate"]):
+    if any(kw in all_topics for kw in ["image-to-video", "i2v", "img2video", "animate", "animation"]):
         tags.append("i2v")
-    if any(kw in all_topics for kw in ["text-to-speech", "tts"]):
+    if any(kw in all_topics for kw in ["video-to-video", "v2v", "video-editing", "video-enhancement"]):
+        tags.append("v2v")
+    if any(kw in all_topics for kw in ["text-to-speech", "tts", "speech-synthesis"]):
         tags.append("tts")
-    if any(kw in all_topics for kw in ["speech-to-text", "asr", "transcription", "whisper"]):
+    if any(kw in all_topics for kw in ["speech-to-text", "asr", "transcription", "whisper", "speech-recognition"]):
         tags.append("asr")
+    if any(kw in all_topics for kw in ["speech-to-speech", "sts", "voice-cloning", "voice-synthesis"]):
+        tags.append("sts")
+    if any(kw in all_topics for kw in ["voice-conversion", "voice-clone", "vc", "voice-transfer"]):
+        tags.append("voice-conversion")
+    if any(kw in all_topics for kw in ["speech-enhancement", "noise-reduction", "audio-enhancement"]):
+        tags.append("speech-enhancement")
+    if any(kw in all_topics for kw in ["music-generation", "musicgen", "audio-generation"]):
+        tags.append("musicgen")
     
     # 3. ECOSYSTEM (how people actually build)
     if any(kw in all_topics for kw in ["diffusers", "huggingface-diffusers"]):
@@ -129,28 +207,38 @@ def extract_tags(text, topics, license_info=None):
     # 4. CONTROL & CONDITIONING (massive differentiator)
     if any(kw in all_topics for kw in ["controlnet", "control-net", "conditioning"]):
         tags.append("controlnet")
-    if any(kw in all_topics for kw in ["pose", "depth", "normal", "canny", "edge"]):
+    if any(kw in all_topics for kw in ["pose", "depth", "normal", "canny", "edge", "openpose"]):
         tags.append("pose-depth")
-    if any(kw in all_topics for kw in ["motion", "motion-control", "camera"]):
+    if any(kw in all_topics for kw in ["motion", "motion-control", "camera", "temporal"]):
         tags.append("motion-control")
-    if any(kw in all_topics for kw in ["inpaint", "outpaint", "mask"]):
+    if any(kw in all_topics for kw in ["inpaint", "outpaint", "mask", "inpainting", "outpainting"]):
         tags.append("inpainting")
-    if any(kw in all_topics for kw in ["lora", "adapter", "dreambooth"]):
+    if any(kw in all_topics for kw in ["upscale", "upscaling", "super-resolution", "sr", "enhance"]):
+        tags.append("upscaling")
+    if any(kw in all_topics for kw in ["lora", "adapter", "dreambooth", "fine-tuning"]):
         tags.append("lora")
+    if any(kw in all_topics for kw in ["segmentation", "semantic-seg", "instance-seg", "mask-generation"]):
+        tags.append("segmentation")
     
     # 5. PIPELINE TYPE (builder axis)
     if any(kw in all_topics for kw in ["training", "train", "fine-tune", "finetune", "fine-tuning"]):
         tags.append("training")
     if any(kw in all_topics for kw in ["inference", "serving", "deployment", "server", "api"]):
         tags.append("inference")
-    if any(kw in all_topics for kw in ["eval", "evaluation", "benchmark", "testing"]):
+    if any(kw in all_topics for kw in ["eval", "evaluation", "benchmark", "testing", "metrics"]):
         tags.append("eval")
     if any(kw in all_topics for kw in ["dataset", "data", "corpus"]):
         tags.append("dataset")
-    if any(kw in all_topics for kw in ["gradio", "streamlit", "web-ui", "interface", "demo"]):
+    if any(kw in all_topics for kw in ["gradio", "streamlit", "web-ui", "interface", "demo", "webapp"]):
         tags.append("ui")
-    if any(kw in all_topics for kw in ["plugin", "extension", "node", "custom-node"]):
+    if any(kw in all_topics for kw in ["plugin", "extension", "node", "custom-node", "addon"]):
         tags.append("plugin")
+    if any(kw in all_topics for kw in ["cli", "command-line", "terminal"]):
+        tags.append("cli")
+    if any(kw in all_topics for kw in ["library", "sdk", "framework", "toolkit"]):
+        tags.append("library")
+    if any(kw in all_topics for kw in ["node-graph", "visual-programming", "workflow"]):
+        tags.append("node-graph")
     
     # 6. LICENSE BUCKET
     if license_info:
@@ -174,15 +262,29 @@ def extract_tags(text, topics, license_info=None):
     if any(kw in all_topics for kw in ["flow", "flow-matching", "rectified-flow"]):
         tags.append("flow")
     
-    # Real-time signals
-    if any(kw in all_topics for kw in ["realtime", "real-time", "live", "streaming", "interactive"]):
-        tags.append("realtime")
-    if any(kw in all_topics for kw in ["on-device", "mobile", "edge", "quantized"]):
+    # System properties (latency/deployment)
+    if any(kw in all_topics for kw in ["realtime", "real-time", "live", "low-latency"]):
+        tags.append("real-time")
+    if any(kw in all_topics for kw in ["interactive", "responsive", "fast"]):
+        tags.append("interactive")
+    if any(kw in all_topics for kw in ["streaming", "stream", "live-stream"]):
+        tags.append("streaming")
+    if any(kw in all_topics for kw in ["on-device", "mobile", "edge", "quantized", "onnx", "tensorrt"]):
         tags.append("on-device")
+    if any(kw in all_topics for kw in ["batch", "offline", "scheduled"]):
+        tags.append("batch")
+    
+    # World-model / simulation / agent
+    if any(kw in all_topics for kw in ["world-model", "world model", "predictive-model"]):
+        tags.append("world-model")
+    if any(kw in all_topics for kw in ["simulation", "simulator", "sim", "physics"]):
+        tags.append("simulation")
+    if any(kw in all_topics for kw in ["agent", "autonomous", "tool-use", "function-calling", "agentic"]):
+        tags.append("agents")
+    if any(kw in all_topics for kw in ["environment", "gym", "embodied", "robotics"]):
+        tags.append("environment")
     
     # LLM-specific (keep from old use_cases)
-    if any(kw in all_topics for kw in ["agent", "autonomous", "tool-use", "function-calling"]):
-        tags.append("agents")
     if any(kw in all_topics for kw in ["rag", "retrieval", "vector-db", "embedding"]):
         tags.append("rag")
     
@@ -743,6 +845,36 @@ def fetch_huggingface_models(config):
                     # Keep use_cases for backward compat
                     use_cases = [t for t in extracted_tags if t in ["agents", "inference", "eval", "training", "dataset", "rag"]]
                     
+                    # Extract HF-specific metadata
+                    hf_metadata = {
+                        "library": getattr(model, "library_name", None),
+                        "pipeline_tag": getattr(model, "pipeline_tag", None),
+                        "license": None,
+                        "base_model": None,
+                        "architecture": None,
+                        "datasets": [],
+                        "paper": None
+                    }
+                    
+                    # Try to get more metadata from cardData if available
+                    card_data = getattr(model, "cardData", {}) or {}
+                    if isinstance(card_data, dict):
+                        hf_metadata["license"] = card_data.get("license")
+                        hf_metadata["base_model"] = card_data.get("base_model")
+                        hf_metadata["datasets"] = card_data.get("datasets", [])[:3] if card_data.get("datasets") else []
+                        
+                        # Try to extract paper URL from metadata
+                        if "arxiv" in card_data:
+                            hf_metadata["paper"] = card_data["arxiv"]
+                        elif "paper" in card_data:
+                            hf_metadata["paper"] = card_data["paper"]
+                    
+                    # Try to infer architecture from tags or model name
+                    for tag in hf_tags_raw:
+                        if any(arch in tag.lower() for arch in ["gpt", "llama", "mistral", "falcon", "bert", "t5", "vit", "clip", "sdxl", "stable-diffusion"]):
+                            hf_metadata["architecture"] = tag
+                            break
+                    
                     project = {
                         "source": "huggingface",
                         "id": f"hf_{model_id.replace('/', '_')}",
@@ -757,6 +889,7 @@ def fetch_huggingface_models(config):
                         "days_since_update": days_since_update,
                         "tags": extracted_tags,  # New: comprehensive tag list
                         "use_cases": use_cases,  # Kept for backward compat
+                        "hf": hf_metadata,  # New: HF-specific metadata
                     }
                     
                     # Compute 3 scores
@@ -827,11 +960,45 @@ def compute_facets(projects):
     return facets
 
 def save_projects(projects):
-    """Save projects to data/projects.json with facets"""
+    """Save projects to data/projects.json with facets and momentum"""
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     
     output_file = data_dir / "projects.json"
+    
+    # Load previous metrics snapshot for momentum calculation
+    previous_snapshot = load_metrics_snapshot()
+    new_snapshot = {}
+    
+    # Compute momentum for each project
+    for project in projects:
+        # Build key: "github:owner/repo" or "huggingface:org/model"
+        key = f"{project['source']}:{project.get('full_name') or project['id']}"
+        
+        # Current metrics
+        current_metrics = {
+            'source': project['source'],
+            'stars': project.get('stars', 0),
+            'forks': project.get('forks', 0),
+            'downloads': project.get('downloads', 0),
+            'likes': project.get('likes', 0),
+        }
+        
+        # Get previous metrics
+        previous_metrics = previous_snapshot.get(key, {})
+        
+        # Compute momentum
+        momentum = compute_momentum(current_metrics, previous_metrics)
+        project['momentum'] = momentum
+        
+        # Save to new snapshot
+        new_snapshot[key] = {
+            **current_metrics,
+            'fetched_at': datetime.utcnow().isoformat()
+        }
+    
+    # Save new snapshot for next run
+    save_metrics_snapshot(new_snapshot)
     
     # Apply tag overrides
     projects = apply_tag_overrides(projects)
@@ -854,6 +1021,7 @@ def save_projects(projects):
     
     print(f"✓ Saved {len(projects_sorted)} projects to {output_file}")
     print(f"✓ Facets: {len(facets['tags'])} unique tags, {len(facets['source'])} sources")
+    print(f"✓ Momentum: {len([p for p in projects if p.get('momentum', {}).get('momentum_label') == 'rising'])} rising, {len([p for p in projects if p.get('momentum', {}).get('momentum_label') == 'steady'])} steady")
 
 if __name__ == "__main__":
     # Verify tokens are loaded

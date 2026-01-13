@@ -42,6 +42,23 @@ type Project = {
     health_score: number;
     health_label: 'alive' | 'steady' | 'decaying';
   };
+  momentum?: {
+    stars_delta: number;
+    forks_delta: number;
+    downloads_delta: number;
+    likes_delta: number;
+    momentum_score: number;
+    momentum_label: 'rising' | 'steady' | 'flat';
+  };
+  hf?: {
+    library: string | null;
+    pipeline_tag: string | null;
+    license: string | null;
+    base_model: string | null;
+    architecture: string | null;
+    datasets: string[];
+    paper: string | null;
+  };
 };
 
 type ProjectData = {
@@ -126,13 +143,24 @@ const DISCOVERY_LENSES: Lens[] = [
       (p.health?.contributors_90d ?? p.contributors?.length ?? 0) <= 1 && p.popularity_score > median.popularity,
     sortKey: 'popularity',
   },
+  {
+    id: 'rising',
+    label: 'Rising',
+    description: 'High momentum, active growth, not decaying',
+    filter: (p) =>
+      p.momentum?.momentum_label === 'rising' &&
+      p.days_since_update <= 60 &&
+      p.health?.health_label !== 'decaying',
+    sortKey: 'health',  // Will use momentum sort when available
+  },
 ];
 
 // Helper: compute "why interesting" one-liner
 function computeWhyInteresting(p: Project): string {
   const parts: string[] = [];
   
-  if (p.health?.health_label === 'alive') parts.push('Alive');
+  if (p.momentum?.momentum_label === 'rising') parts.push('Rising');
+  else if (p.health?.health_label === 'alive') parts.push('Alive');
   else if (p.health?.health_label === 'steady') parts.push('Steady');
   
   const contribCount = p.health?.contributors_90d ?? p.contributors?.length ?? 0;
@@ -140,18 +168,40 @@ function computeWhyInteresting(p: Project): string {
   else if (contribCount >= 2) parts.push('team-maintained');
   
   const tags = p.tags ?? [];
-  const modality = tags.find((t) => ['image', 'video', 'audio', '3d', 'multimodal'].includes(t));
+  const modality = tags.find((t) => ['image', 'video', 'audio', '3d', 'multimodal', 'world'].includes(t));
   if (modality) parts.push(modality);
   
-  const task = tags.find((t) => ['t2i', 'i2i', 't2v', 'i2v', 'tts', 'asr'].includes(t));
+  const task = tags.find((t) => ['t2i', 'i2i', 't2v', 'i2v', 'v2v', 'tts', 'asr', 'sts', 'voice-conversion'].includes(t));
   if (task) parts.push(task);
   
-  const ecosystem = tags.find((t) => ['comfyui', 'diffusers', 'automatic1111', 'pytorch'].includes(t));
+  const ecosystem = tags.find((t) => ['comfyui', 'diffusers', 'automatic1111', 'pytorch', 'sdxl'].includes(t));
   if (ecosystem) parts.push(ecosystem);
   
   if (p.popularity_score >= 80) parts.push('highly adopted');
   
   return parts.slice(0, 5).join(' • ') || 'Open source project';
+}
+
+// Helper: extract license info for display
+function getLicenseLabel(p: Project): string | null {
+  // Check HF metadata first
+  if (p.hf?.license) {
+    const lic = p.hf.license.toLowerCase();
+    if (lic.includes('mit')) return 'MIT';
+    if (lic.includes('apache')) return 'Apache';
+    if (lic.includes('bsd')) return 'BSD';
+    if (lic.includes('gpl')) return 'GPL';
+    if (lic.includes('cc')) return 'CC';
+    return p.hf.license.substring(0, 10);
+  }
+  
+  // Check tags
+  const tags = p.tags ?? [];
+  if (tags.includes('permissive')) return 'Permissive';
+  if (tags.includes('restricted')) return 'Restricted';
+  if (tags.includes('unclear-license')) return 'Unknown';
+  
+  return null;
 }
 
 // Helper: compute related projects
@@ -200,7 +250,7 @@ export default function Home() {
   const searchParams = useSearchParams();
   const [data, setData] = useState<ProjectData | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'popularity' | 'health' | 'people' | 'newest'>('health');
+  const [sortBy, setSortBy] = useState<'popularity' | 'health' | 'people' | 'newest' | 'momentum'>('health');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'github' | 'huggingface'>('all');
   const [healthFilter, setHealthFilter] = useState<'all' | 'hot' | 'steady' | 'decaying'>('all');
   const [useCaseFilter, setUseCaseFilter] = useState<string[]>([]);
@@ -368,6 +418,7 @@ export default function Home() {
       if (sortBy === 'health') return b.health_score - a.health_score;
       if (sortBy === 'people') return b.people_score - a.people_score;
       if (sortBy === 'newest') return a.days_since_update - b.days_since_update;
+      if (sortBy === 'momentum') return (b.momentum?.momentum_score ?? 0) - (a.momentum?.momentum_score ?? 0);
       return 0;
     });
 
@@ -474,6 +525,7 @@ export default function Home() {
               <option value="health">Health</option>
               <option value="popularity">Popularity</option>
               <option value="people">People</option>
+              <option value="momentum">Momentum</option>
               <option value="newest">Newest</option>
             </select>
 
@@ -724,7 +776,17 @@ export default function Home() {
                           {project.health.health_label}
                         </span>
                       )}
-                      {(project.tags ?? []).slice(0, 3).map((tag) => (
+                      {project.momentum?.momentum_label === 'rising' && (
+                        <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+                          ⬆️ rising
+                        </span>
+                      )}
+                      {getLicenseLabel(project) && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
+                          📄 {getLicenseLabel(project)}
+                        </span>
+                      )}
+                      {(project.tags ?? []).slice(0, 2).map((tag) => (
                         <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
                           {tag}
                         </span>
@@ -821,7 +883,85 @@ export default function Home() {
                     />
                   </div>
                 </div>
+                {selectedProject.momentum && (
+                  <div>
+                    <div className="flex justify-between mb-1">
+                      <span>Momentum</span>
+                      <span className="font-medium">{selectedProject.momentum.momentum_score.toFixed(1)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-600"
+                        style={{ width: `${Math.min(100, selectedProject.momentum.momentum_score * 10)}%` }}
+                      />
+                    </div>
+                    {(selectedProject.momentum.stars_delta > 0 || selectedProject.momentum.downloads_delta > 0 || selectedProject.momentum.likes_delta > 0) && (
+                      <div className="mt-1 text-[10px] text-gray-500">
+                        {selectedProject.momentum.stars_delta > 0 && `+${selectedProject.momentum.stars_delta} ⭐ `}
+                        {selectedProject.momentum.downloads_delta > 0 && `+${selectedProject.momentum.downloads_delta.toLocaleString()} ⬇️ `}
+                        {selectedProject.momentum.likes_delta > 0 && `+${selectedProject.momentum.likes_delta} ❤️`}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+
+              {/* HF Metadata */}
+              {selectedProject.hf && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">HuggingFace Info</h3>
+                  <div className="space-y-1 text-xs text-gray-600">
+                    {selectedProject.hf.library && (
+                      <div className="flex justify-between">
+                        <span>Library:</span>
+                        <span className="font-medium">{selectedProject.hf.library}</span>
+                      </div>
+                    )}
+                    {selectedProject.hf.pipeline_tag && (
+                      <div className="flex justify-between">
+                        <span>Pipeline:</span>
+                        <span className="font-medium">{selectedProject.hf.pipeline_tag}</span>
+                      </div>
+                    )}
+                    {selectedProject.hf.license && (
+                      <div className="flex justify-between">
+                        <span>License:</span>
+                        <span className="font-medium">{selectedProject.hf.license}</span>
+                      </div>
+                    )}
+                    {selectedProject.hf.base_model && (
+                      <div className="flex justify-between">
+                        <span>Base Model:</span>
+                        <span className="font-medium text-[10px]">{selectedProject.hf.base_model}</span>
+                      </div>
+                    )}
+                    {selectedProject.hf.datasets && selectedProject.hf.datasets.length > 0 && (
+                      <div>
+                        <span>Datasets:</span>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {selectedProject.hf.datasets.map((ds) => (
+                            <span key={ds} className="px-1.5 py-0.5 bg-gray-100 rounded text-[10px]">
+                              {ds}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedProject.hf.paper && (
+                      <div className="mt-2">
+                        <a
+                          href={selectedProject.hf.paper}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-800 underline"
+                        >
+                          📄 Paper
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Tags */}
               {(selectedProject.tags ?? []).length > 0 && (
