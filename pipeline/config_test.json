@@ -1,0 +1,26 @@
+{
+  "since_days": 90,
+  "max_total_repos": 50,
+  "github": {
+    "topics": ["llm", "agents"],
+    "min_stars": 500,
+    "per_topic_limit": 20,
+    "top_contributors": 10,
+    "quality_gates": {
+      "exclude_forks": true,
+      "exclude_archived": true,
+      "require_license": true,
+      "require_readme": true,
+      "min_commits_90d": 5
+    }
+  },
+  "huggingface": {
+    "queries": ["llm", "agent"],
+    "per_query_limit": 15,
+    "quality_gates": {
+      "min_downloads": 1000,
+      "min_likes": 5,
+      "max_age_days": 365
+    }
+  }
+}

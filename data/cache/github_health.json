@@ -1,0 +1,17 @@
+{
+  "langflow-ai/langflow": {
+    "health": {
+      "days_since_push": 731,
+      "days_since_release": 6,
+      "commits_30d": 91,
+      "commits_90d": 323,
+      "contributors_90d": 26,
+      "prs_merged_60d": 72,
+      "issues_opened_60d": 13,
+      "issues_closed_60d": 3,
+      "health_score": 0.5846153846153846,
+      "health_label": "steady"
+    },
+    "fetched_at": "2026-01-13T22:19:18.420733"
+  }
+}

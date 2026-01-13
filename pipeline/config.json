@@ -1,0 +1,48 @@
+{
+  "since_days": 90,
+  "max_total_repos": 2000,
+  "github": {
+    "topics": [
+      "llm",
+      "diffusion",
+      "inference",
+      "agents",
+      "eval",
+      "multimodal",
+      "transformers",
+      "rag",
+      "vector-database",
+      "mlops"
+    ],
+    "min_stars": 100,
+    "per_topic_limit": 150,
+    "top_contributors": 10,
+    "quality_gates": {
+      "exclude_forks": true,
+      "exclude_archived": true,
+      "require_license": true,
+      "require_readme": true,
+      "min_commits_90d": 5
+    }
+  },
+  "huggingface": {
+    "queries": [
+      "llm",
+      "diffusion",
+      "agent",
+      "embedding",
+      "vlm",
+      "text-generation",
+      "image-generation",
+      "vision",
+      "audio"
+    ],
+    "per_query_limit": 80,
+    "quality_gates": {
+      "min_downloads": 100,
+      "min_likes": 2,
+      "max_age_days": 365
+    }
+  }
+}
+

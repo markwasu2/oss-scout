@@ -1,0 +1,6 @@
+{
+  "_comment": "Manual tag overrides for projects. Key format: 'github:owner/repo' or 'huggingface:org/model'",
+  "_example": "github:comfyanonymous/ComfyUI",
+  "_tags_example": ["comfyui", "node-graph", "ui", "image", "video"]
+}
+

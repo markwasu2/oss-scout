@@ -1,65 +1,897 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useEffect, useMemo } from 'react';
+import { useSearchParams } from 'next/navigation';
+
+type Project = {
+  source: string;
+  id: string;
+  name: string;
+  full_name: string;
+  description: string;
+  stars?: number;
+  likes?: number;
+  downloads?: number;
+  forks?: number;
+  language?: string;
+  url: string;
+  topics: string[];
+  updated_at: string;
+  days_since_update: number;
+  contributors?: Array<{
+    login: string;
+    avatar_url: string;
+    contributions: number;
+    url: string;
+  }>;
+  tags: string[];
+  use_cases: string[];
+  score: number;
+  popularity_score: number;
+  health_score: number;
+  people_score: number;
+  health?: {
+    days_since_push: number;
+    days_since_release: number | null;
+    commits_30d: number;
+    commits_90d: number;
+    contributors_90d: number;
+    prs_merged_60d: number;
+    issues_opened_60d: number;
+    issues_closed_60d: number;
+    health_score: number;
+    health_label: 'alive' | 'steady' | 'decaying';
+  };
+};
+
+type ProjectData = {
+  generated_at: string;
+  count: number;
+  projects: Project[];
+};
+
+// Discovery Lens type
+type Lens = {
+  id: string;
+  label: string;
+  description: string;
+  filter: (p: Project, median: { popularity: number }) => boolean;
+  sortKey: 'health' | 'popularity' | 'people' | 'newest';
+};
+
+const DISCOVERY_LENSES: Lens[] = [
+  {
+    id: 'all',
+    label: 'All',
+    description: 'All projects',
+    filter: () => true,
+    sortKey: 'health',
+  },
+  {
+    id: 'hidden-gems',
+    label: 'Hidden Gems',
+    description: 'Alive, multi-maintainer, below median popularity',
+    filter: (p, median) =>
+      p.health?.health_label === 'alive' &&
+      p.days_since_update <= 60 &&
+      (p.health?.contributors_90d ?? p.contributors?.length ?? 0) >= 2 &&
+      p.popularity_score < median.popularity,
+    sortKey: 'health',
+  },
+  {
+    id: 'production-ready',
+    label: 'Production-Ready',
+    description: 'Alive or steady, updated recently, permissive license',
+    filter: (p) =>
+      (p.health?.health_label === 'alive' || p.health?.health_label === 'steady' || p.days_since_update <= 180) &&
+      p.days_since_update <= 180,
+    sortKey: 'health',
+  },
+  {
+    id: 'composable-builders',
+    label: 'Composable Builders',
+    description: 'Node-graph, plugin, library systems in active ecosystems',
+    filter: (p) =>
+      (p.tags ?? []).some((t) =>
+        ['comfyui', 'diffusers', 'automatic1111', 'node-graph', 'plugin', 'library', 'nodes'].includes(t)
+      ),
+    sortKey: 'health',
+  },
+  {
+    id: 'realtime',
+    label: 'Real-Time / Interactive',
+    description: 'Low-latency, interactive, streaming, on-device',
+    filter: (p) =>
+      (p.tags ?? []).some((t) => ['realtime', 'real-time', 'interactive', 'streaming', 'on-device'].includes(t)),
+    sortKey: 'health',
+  },
+  {
+    id: 'research-alive',
+    label: 'Research-Alive',
+    description: 'Benchmark/eval/paper projects still maintained',
+    filter: (p) => {
+      const allText = [...(p.tags ?? []), ...(p.use_cases ?? []), ...(p.topics ?? [])].join(' ');
+      const isResearch = /benchmark|eval|paper|arxiv|metrics|leaderboard/i.test(allText);
+      const isAlive =
+        p.health?.health_label === 'alive' || (p.source === 'huggingface' && p.days_since_update <= 90);
+      return isResearch && isAlive;
+    },
+    sortKey: 'health',
+  },
+  {
+    id: 'single-maintainer-risk',
+    label: 'Single-Maintainer Risk',
+    description: 'Popular but maintained by ≤1 person',
+    filter: (p, median) =>
+      (p.health?.contributors_90d ?? p.contributors?.length ?? 0) <= 1 && p.popularity_score > median.popularity,
+    sortKey: 'popularity',
+  },
+];
+
+// Helper: compute "why interesting" one-liner
+function computeWhyInteresting(p: Project): string {
+  const parts: string[] = [];
+  
+  if (p.health?.health_label === 'alive') parts.push('Alive');
+  else if (p.health?.health_label === 'steady') parts.push('Steady');
+  
+  const contribCount = p.health?.contributors_90d ?? p.contributors?.length ?? 0;
+  if (contribCount >= 5) parts.push('multi-maintainer');
+  else if (contribCount >= 2) parts.push('team-maintained');
+  
+  const tags = p.tags ?? [];
+  const modality = tags.find((t) => ['image', 'video', 'audio', '3d', 'multimodal'].includes(t));
+  if (modality) parts.push(modality);
+  
+  const task = tags.find((t) => ['t2i', 'i2i', 't2v', 'i2v', 'tts', 'asr'].includes(t));
+  if (task) parts.push(task);
+  
+  const ecosystem = tags.find((t) => ['comfyui', 'diffusers', 'automatic1111', 'pytorch'].includes(t));
+  if (ecosystem) parts.push(ecosystem);
+  
+  if (p.popularity_score >= 80) parts.push('highly adopted');
+  
+  return parts.slice(0, 5).join(' • ') || 'Open source project';
+}
+
+// Helper: compute related projects
+function computeRelated(selected: Project, allProjects: Project[]): Project[] {
+  const others = allProjects.filter((p) => p.id !== selected.id);
+  
+  if (selected.source === 'github' && selected.contributors && selected.contributors.length > 0) {
+    // Rank by shared contributors
+    const selectedContribs = new Set(selected.contributors.map((c) => c.login));
+    const scored = others
+      .filter((p) => p.source === 'github' && p.contributors)
+      .map((p) => {
+        const overlap = p.contributors!.filter((c) => selectedContribs.has(c.login)).length;
+        return { project: p, score: overlap };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.project.score - a.project.score);
+    
+    if (scored.length > 0) return scored.slice(0, 6).map((s) => s.project);
+  }
+  
+  // Jaccard similarity on tags/topics/use_cases
+  const selectedTokens = new Set([
+    ...(selected.tags ?? []),
+    ...(selected.use_cases ?? []),
+    ...(selected.topics ?? []),
+  ]);
+  
+  if (selectedTokens.size === 0) return [];
+  
+  const scored = others
+    .map((p) => {
+      const pTokens = new Set([...(p.tags ?? []), ...(p.use_cases ?? []), ...(p.topics ?? [])]);
+      const intersection = [...selectedTokens].filter((t) => pTokens.has(t)).length;
+      const union = new Set([...selectedTokens, ...pTokens]).size;
+      const jaccard = union > 0 ? intersection / union : 0;
+      return { project: p, score: jaccard };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || b.project.score - a.project.score);
+  
+  return scored.slice(0, 6).map((s) => s.project);
+}
 
 export default function Home() {
+  const searchParams = useSearchParams();
+  const [data, setData] = useState<ProjectData | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortBy] = useState<'popularity' | 'health' | 'people' | 'newest'>('health');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'github' | 'huggingface'>('all');
+  const [healthFilter, setHealthFilter] = useState<'all' | 'hot' | 'steady' | 'decaying'>('all');
+  const [useCaseFilter, setUseCaseFilter] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [maxDaysOld, setMaxDaysOld] = useState(90);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [contributorFilter, setContributorFilter] = useState<string | null>(null);
+  const [activeLens, setActiveLens] = useState<string>('all');
+  const [minStars, setMinStars] = useState(0);
+  const [minContributors, setMinContributors] = useState(0);
+  const [leftRailOpen, setLeftRailOpen] = useState(true);
+
+  // Load data
+  useEffect(() => {
+    fetch('/data/projects.json')
+      .then((res) => res.json())
+      .then((data) => setData(data))
+      .catch((err) => console.error('Failed to load projects:', err));
+  }, []);
+
+  // Handle URL params (for contributor filter from graph)
+  useEffect(() => {
+    const contributor = searchParams?.get('contributor');
+    if (contributor) {
+      setContributorFilter(contributor);
+      setSourceFilter('github'); // Contributors only exist on GitHub (match data source field)
+    }
+  }, [searchParams]);
+
+  // Available use cases
+  const allUseCases = useMemo(() => {
+    if (!data) return [];
+    const cases = new Set<string>();
+    data.projects.forEach((p) => p.use_cases.forEach((uc) => cases.add(uc)));
+    return Array.from(cases).sort();
+  }, [data]);
+
+  // Available tags with counts (categorized)
+  const availableTags = useMemo(() => {
+    if (!data) return { modality: [], task: [], ecosystem: [], control: [], pipeline: [], license: [] };
+    
+    const tagCounts = new Map<string, number>();
+    data.projects.forEach((p) => {
+      p.tags?.forEach((tag) => {
+        tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+      });
+    });
+
+    // Categorize tags
+    const categories = {
+      modality: ['image', 'video', 'audio', '3d', 'multimodal'],
+      task: ['t2i', 'i2i', 't2v', 'i2v', 'tts', 'asr'],
+      ecosystem: ['diffusers', 'comfyui', 'automatic1111', 'sdxl', 'kohya', 'pytorch', 'jax', 'onnx'],
+      control: ['controlnet', 'pose-depth', 'motion-control', 'inpainting', 'lora'],
+      pipeline: ['training', 'inference', 'eval', 'dataset', 'ui', 'plugin'],
+      license: ['permissive', 'restricted', 'unclear-license'],
+    };
+
+    const result: Record<string, Array<{ tag: string; count: number }>> = {};
+    
+    for (const [category, tags] of Object.entries(categories)) {
+      result[category] = tags
+        .map((tag) => ({ tag, count: tagCounts.get(tag) || 0 }))
+        .filter((item) => item.count > 0)
+        .sort((a, b) => b.count - a.count);
+    }
+
+    return result;
+  }, [data]);
+
+  // Compute median popularity
+  const medianPopularity = useMemo(() => {
+    if (!data) return 50;
+    const scores = data.projects.map((p) => p.popularity_score).sort((a, b) => a - b);
+    return scores[Math.floor(scores.length / 2)] ?? 50;
+  }, [data]);
+
+  // Filtered and sorted projects
+  const filteredProjects = useMemo(() => {
+    if (!data) return [];
+
+    let filtered = data.projects;
+
+    // Search
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q) ||
+          p.topics.some((t) => t.toLowerCase().includes(q))
+      );
+    }
+
+    // Source filter
+    if (sourceFilter !== 'all') {
+      filtered = filtered.filter((p) => p.source === sourceFilter);
+    }
+
+    // Health filter
+    if (healthFilter !== 'all') {
+      filtered = filtered.filter((p) => {
+        const healthLabel = p.health?.health_label;
+        if (!healthLabel) return healthFilter !== 'hot';
+        if (healthFilter === 'hot') return healthLabel === 'alive';
+        if (healthFilter === 'steady') return healthLabel === 'steady';
+        if (healthFilter === 'decaying') return healthLabel === 'decaying';
+        return true;
+      });
+    }
+
+    // Use case filter
+    if (useCaseFilter.length > 0) {
+      filtered = filtered.filter((p) =>
+        useCaseFilter.some((uc) => p.use_cases.includes(uc))
+      );
+    }
+
+    // Tag filters
+    if (tagFilters.length > 0) {
+      filtered = filtered.filter((p) =>
+        tagFilters.some((tag) => p.tags?.includes(tag))
+      );
+    }
+
+    // Contributor filter
+    if (contributorFilter) {
+      filtered = filtered.filter((p) =>
+        p.contributors?.some((c) => c.login === contributorFilter)
+      );
+    }
+
+    // Activity filter
+    filtered = filtered.filter((p) => 
+      p.days_since_update === 0 || p.days_since_update <= maxDaysOld
+    );
+
+    // Min stars/downloads
+    if (minStars > 0) {
+      filtered = filtered.filter((p) => {
+        const metric = p.stars ?? p.downloads ?? 0;
+        return metric >= minStars;
+      });
+    }
+
+    // Min contributors
+    if (minContributors > 0) {
+      filtered = filtered.filter((p) => {
+        const count = p.health?.contributors_90d ?? p.contributors?.length ?? 0;
+        return count >= minContributors;
+      });
+    }
+
+    // Apply lens filter
+    if (activeLens && activeLens !== 'all') {
+      const lens = DISCOVERY_LENSES.find((l) => l.id === activeLens);
+      if (lens) {
+        filtered = filtered.filter((p) => lens.filter(p, { popularity: medianPopularity }));
+      }
+    }
+
+    // Sort
+    filtered = [...filtered].sort((a, b) => {
+      if (sortBy === 'popularity') return b.popularity_score - a.popularity_score;
+      if (sortBy === 'health') return b.health_score - a.health_score;
+      if (sortBy === 'people') return b.people_score - a.people_score;
+      if (sortBy === 'newest') return a.days_since_update - b.days_since_update;
+      return 0;
+    });
+
+    return filtered;
+  }, [data, searchQuery, sortBy, sourceFilter, healthFilter, useCaseFilter, tagFilters, contributorFilter, maxDaysOld, minStars, minContributors, activeLens, medianPopularity]);
+
+  // Related projects (for selected project)
+  const relatedProjects = useMemo(() => {
+    if (!data || !selectedProject) return [];
+    return computeRelated(selectedProject, data.projects);
+  }, [data, selectedProject]);
+
+  const toggleUseCase = (useCase: string) => {
+    setUseCaseFilter((prev) =>
+      prev.includes(useCase)
+        ? prev.filter((uc) => uc !== useCase)
+        : [...prev, useCase]
+    );
+  };
+
+  const toggleTag = (tag: string) => {
+    setTagFilters((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
+    );
+  };
+
+  const applyLens = (lensId: string) => {
+    const lens = DISCOVERY_LENSES.find((l) => l.id === lensId);
+    if (!lens) return;
+    
+    setActiveLens(lensId);
+    setSortBy(lens.sortKey);
+    setSearchQuery('');
+  };
+
+  const resetFilters = () => {
+    setActiveLens('all');
+    setSortBy('health');
+    setHealthFilter('all');
+    setSourceFilter('all');
+    setTagFilters([]);
+    setUseCaseFilter([]);
+    setContributorFilter(null);
+    setMinStars(0);
+    setMinContributors(0);
+    setMaxDaysOld(90);
+  };
+
+  if (!data) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-gray-600">Loading projects...</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+    <div className="min-h-screen bg-gray-50">
+      {/* Top Bar */}
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
+        <div className="max-w-[1600px] mx-auto px-4 py-3">
+          <div className="flex items-center gap-4">
+            {/* Logo + hamburger */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setLeftRailOpen(!leftRailOpen)}
+                className="lg:hidden text-gray-600 hover:text-gray-900"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+              <h1 className="text-xl font-bold text-gray-900">oss-scout</h1>
+            </div>
+
+            {/* Search */}
+            <input
+              type="text"
+              placeholder="Search projects..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="flex-1 min-w-[200px] px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+            {/* Lens dropdown */}
+            <select
+              value={activeLens}
+              onChange={(e) => applyLens(e.target.value)}
+              className="px-3 py-1.5 border border-gray-300 rounded text-sm font-medium focus:ring-2 focus:ring-blue-500"
+            >
+              {DISCOVERY_LENSES.map((lens) => (
+                <option key={lens.id} value={lens.id}>
+                  {lens.label}
+                </option>
+              ))}
+            </select>
+
+            {/* Sort dropdown */}
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+              className="px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="health">Health</option>
+              <option value="popularity">Popularity</option>
+              <option value="people">People</option>
+              <option value="newest">Newest</option>
+            </select>
+
+            {/* Graph link */}
+            <a
+              href="/graph"
+              className="px-3 py-1.5 bg-black text-white rounded text-sm font-medium hover:bg-gray-800 transition-colors"
+            >
+              Graph
+            </a>
+
+            {/* Metadata */}
+            <div className="hidden md:block text-xs text-gray-500">
+              {filteredProjects.length} / {data.count}
+            </div>
+          </div>
         </div>
-      </main>
+
+      </header>
+
+      {/* Main content - 3 column layout */}
+      <div className="flex max-w-[1600px] mx-auto">
+        {/* Left Rail - Filters */}
+        <aside
+          className={`${
+            leftRailOpen ? 'translate-x-0' : '-translate-x-full'
+          } fixed lg:sticky lg:translate-x-0 top-[57px] left-0 w-64 h-[calc(100vh-57px)] bg-white border-r border-gray-200 p-4 overflow-y-auto transition-transform z-40 lg:z-0`}
+        >
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-sm text-gray-900">Filters</h3>
+              <button
+                onClick={resetFilters}
+                className="text-xs text-blue-600 hover:text-blue-800 underline"
+              >
+                Reset
+              </button>
+            </div>
+
+            {/* Source */}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Source</label>
+              <select
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value as any)}
+                className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="all">All</option>
+                <option value="github">GitHub</option>
+                <option value="huggingface">Hugging Face</option>
+              </select>
+            </div>
+
+            {/* Modality */}
+            {availableTags.modality.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Modality</label>
+                <div className="space-y-1">
+                  {availableTags.modality.slice(0, 6).map(({ tag, count }) => (
+                    <label key={tag} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={tagFilters.includes(tag)}
+                        onChange={() => toggleTag(tag)}
+                        className="rounded border-gray-300"
+                      />
+                      <span className="text-gray-700">{tag}</span>
+                      <span className="ml-auto text-xs text-gray-500">({count})</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Task */}
+            {availableTags.task.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Task</label>
+                <div className="space-y-1">
+                  {availableTags.task.slice(0, 6).map(({ tag, count }) => (
+                    <label key={tag} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={tagFilters.includes(tag)}
+                        onChange={() => toggleTag(tag)}
+                        className="rounded border-gray-300"
+                      />
+                      <span className="text-gray-700">{tag}</span>
+                      <span className="ml-auto text-xs text-gray-500">({count})</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Ecosystem */}
+            {availableTags.ecosystem.length > 0 && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Ecosystem</label>
+                <div className="space-y-1">
+                  {availableTags.ecosystem.slice(0, 6).map(({ tag, count }) => (
+                    <label key={tag} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={tagFilters.includes(tag)}
+                        onChange={() => toggleTag(tag)}
+                        className="rounded border-gray-300"
+                      />
+                      <span className="text-gray-700">{tag}</span>
+                      <span className="ml-auto text-xs text-gray-500">({count})</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Health */}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Health</label>
+              <select
+                value={healthFilter}
+                onChange={(e) => setHealthFilter(e.target.value as any)}
+                className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="all">All</option>
+                <option value="hot">Alive</option>
+                <option value="steady">Steady</option>
+                <option value="decaying">Decaying</option>
+              </select>
+            </div>
+
+            {/* Updated within */}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Updated within: {maxDaysOld}d
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="180"
+                value={maxDaysOld}
+                onChange={(e) => setMaxDaysOld(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            {/* Min stars */}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Min stars/downloads: {minStars}
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="10000"
+                step="100"
+                value={minStars}
+                onChange={(e) => setMinStars(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            {/* Min contributors */}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Min contributors: {minContributors}
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="20"
+                value={minContributors}
+                onChange={(e) => setMinContributors(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            {/* Contributor filter banner */}
+            {contributorFilter && (
+              <div className="p-2 bg-blue-50 border border-blue-200 rounded text-xs">
+                <div className="font-medium text-blue-900 mb-1">
+                  By: {contributorFilter}
+                </div>
+                <button
+                  onClick={() => setContributorFilter(null)}
+                  className="text-blue-600 hover:text-blue-800 underline"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Overlay for mobile */}
+        {leftRailOpen && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-25 z-30 lg:hidden"
+            onClick={() => setLeftRailOpen(false)}
+          />
+        )}
+
+        {/* Center Feed */}
+        <main className="flex-1 min-w-0 p-4 lg:px-6">
+          {/* Lens description */}
+          {activeLens !== 'all' && (
+            <div className="mb-4 p-3 bg-white border border-gray-200 rounded text-sm text-gray-700 italic">
+              {DISCOVERY_LENSES.find((l) => l.id === activeLens)?.description}
+            </div>
+          )}
+
+          {/* Cards */}
+          <div className="space-y-3">
+            {filteredProjects.length === 0 ? (
+              <div className="text-center text-gray-500 py-12 bg-white border border-gray-200 rounded">
+                No projects match your filters
+              </div>
+            ) : (
+              filteredProjects.map((project) => (
+                <div
+                  key={project.id}
+                  onClick={() => setSelectedProject(project)}
+                  className={`bg-white border rounded p-4 cursor-pointer transition-all hover:shadow-sm ${
+                    selectedProject?.id === project.id
+                      ? 'ring-2 ring-black'
+                      : 'border-gray-200 hover:border-gray-400'
+                  }`}
+                >
+                  {/* Title + badges */}
+                  <div className="mb-2">
+                    <h3 className="font-bold text-gray-900 mb-1">
+                      {project.full_name || project.name}
+                    </h3>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs font-medium">
+                        {project.source === 'github' ? 'GitHub' : 'HF'}
+                      </span>
+                      {project.health?.health_label && (
+                        <span
+                          className={`px-2 py-0.5 rounded text-xs font-medium ${
+                            project.health.health_label === 'alive'
+                              ? 'bg-green-100 text-green-700'
+                              : project.health.health_label === 'steady'
+                              ? 'bg-yellow-100 text-yellow-700'
+                              : 'bg-red-100 text-red-700'
+                          }`}
+                        >
+                          {project.health.health_label}
+                        </span>
+                      )}
+                      {(project.tags ?? []).slice(0, 3).map((tag) => (
+                        <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Why interesting */}
+                  <p className="text-sm text-gray-600 mb-2 italic">
+                    {computeWhyInteresting(project)}
+                  </p>
+
+                  {/* Metrics */}
+                  <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
+                    {project.stars !== undefined && <span>⭐ {project.stars.toLocaleString()}</span>}
+                    {project.likes !== undefined && <span>❤️ {project.likes.toLocaleString()}</span>}
+                    {project.downloads !== undefined && <span>⬇️ {project.downloads.toLocaleString()}</span>}
+                    {project.contributors && <span>👥 {project.contributors.length}</span>}
+                    <span>📅 {project.days_since_update}d</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </main>
+
+        {/* Right Panel - Details */}
+        {selectedProject && (
+          <aside className="hidden xl:block w-80 sticky top-[57px] h-[calc(100vh-57px)] bg-white border-l border-gray-200 p-4 overflow-y-auto">
+            <div className="space-y-4">
+              {/* Title + link */}
+              <div>
+                <h2 className="font-bold text-gray-900 mb-1">{selectedProject.name}</h2>
+                <p className="text-xs text-gray-600 mb-3">{selectedProject.full_name}</p>
+                <a
+                  href={selectedProject.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block px-3 py-1 bg-black text-white rounded text-xs font-medium hover:bg-gray-800"
+                >
+                  Open {selectedProject.source === 'github' ? 'Repo' : 'Model'} →
+                </a>
+                {selectedProject.source === 'github' && (
+                  <a
+                    href={`/graph?project=${encodeURIComponent(selectedProject.full_name)}`}
+                    className="inline-block ml-2 px-3 py-1 bg-white border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50"
+                  >
+                    Graph
+                  </a>
+                )}
+              </div>
+
+              {/* Description */}
+              <p className="text-sm text-gray-700">{selectedProject.description}</p>
+
+              {/* Scores */}
+              <div className="space-y-2 text-xs">
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <span>Health</span>
+                    <span className="font-medium">{selectedProject.health_score.toFixed(0)}</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${
+                        selectedProject.health_score >= 70 ? 'bg-green-500' :
+                        selectedProject.health_score >= 40 ? 'bg-yellow-500' : 'bg-red-500'
+                      }`}
+                      style={{ width: `${selectedProject.health_score}%` }}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <span>Popularity</span>
+                    <span className="font-medium">{selectedProject.popularity_score.toFixed(0)}</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-orange-500"
+                      style={{ width: `${selectedProject.popularity_score}%` }}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between mb-1">
+                    <span>People</span>
+                    <span className="font-medium">{selectedProject.people_score.toFixed(0)}</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500"
+                      style={{ width: `${selectedProject.people_score}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Tags */}
+              {(selectedProject.tags ?? []).length > 0 && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">Tags</h3>
+                  <div className="flex flex-wrap gap-1">
+                    {selectedProject.tags!.map((tag) => (
+                      <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Contributors */}
+              {selectedProject.contributors && selectedProject.contributors.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">Contributors</h3>
+                  <div className="space-y-2">
+                    {selectedProject.contributors.slice(0, 5).map((c) => (
+                      <button
+                        key={c.login}
+                        onClick={() => {
+                          setContributorFilter(c.login);
+                          setSourceFilter('github');
+                        }}
+                        className="w-full flex items-center gap-2 p-1 hover:bg-gray-50 rounded text-left"
+                      >
+                        <img src={c.avatar_url} alt={c.login} className="w-6 h-6 rounded-full" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-gray-900 truncate">{c.login}</div>
+                          <div className="text-[10px] text-gray-500">{c.contributions} commits</div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Related projects */}
+              {relatedProjects.length > 0 && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">Related</h3>
+                  <div className="space-y-2">
+                    {relatedProjects.map((related) => (
+                      <button
+                        key={related.id}
+                        onClick={() => setSelectedProject(related)}
+                        className="w-full p-2 border border-gray-200 rounded hover:border-gray-400 transition-colors text-left"
+                      >
+                        <div className="text-xs font-medium text-gray-900 truncate mb-1">
+                          {related.name}
+                        </div>
+                        <div className="flex gap-1 flex-wrap">
+                          {(related.tags ?? []).slice(0, 3).map((tag) => (
+                            <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px]">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
     </div>
   );
 }
