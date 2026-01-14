@@ -67,6 +67,13 @@ type Project = {
     datasets: string[];
     paper: string | null;
   };
+  hf_v2?: {
+    architecture_family: string | null;
+    training_type: 'base' | 'finetune' | 'lora' | null;
+    eval_present: boolean;
+    benchmark_mentioned: boolean;
+    license_clarity: 'explicit' | 'inherited' | 'unknown';
+  };
 };
 
 type ProjectData = {
@@ -180,6 +187,36 @@ const DISCOVERY_LENSES: Lens[] = [
       p.days_since_update <= 60 &&
       p.health?.health_label !== 'decaying',
     sortKey: 'health',  // Will use momentum sort when available
+  },
+  {
+    id: 'hf-enterprise',
+    label: 'Enterprise HF',
+    description: 'HuggingFace models: explicit license + eval present',
+    filter: (p) =>
+      p.source === 'huggingface' &&
+      (p as any).hf_v2?.license_clarity === 'explicit' &&
+      (p as any).hf_v2?.eval_present === true,
+    sortKey: 'popularity',
+  },
+  {
+    id: 'hf-eval-reported',
+    label: 'Eval-Reported HF',
+    description: 'HuggingFace models with benchmark/eval metrics',
+    filter: (p) =>
+      p.source === 'huggingface' &&
+      ((p as any).hf_v2?.eval_present === true || (p as any).hf_v2?.benchmark_mentioned === true),
+    sortKey: 'popularity',
+  },
+  {
+    id: 'hf-production',
+    label: 'Production HF',
+    description: 'HF models: permissive license + popular + eval present',
+    filter: (p) =>
+      p.source === 'huggingface' &&
+      (p as any).hf_v2?.license_clarity === 'explicit' &&
+      (p as any).hf_v2?.eval_present === true &&
+      p.popularity_score >= 50,
+    sortKey: 'popularity',
   },
 ];
 
@@ -1321,6 +1358,55 @@ export default function Home() {
                         </a>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* HF v2 Vetting Info */}
+              {selectedProject.hf_v2 && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">Model Vetting (v2)</h3>
+                  <div className="space-y-1 text-xs text-gray-600">
+                    {selectedProject.hf_v2.training_type && (
+                      <div className="flex justify-between">
+                        <span>Training:</span>
+                        <span className={`font-medium px-2 py-0.5 rounded ${
+                          selectedProject.hf_v2.training_type === 'base' ? 'bg-blue-100 text-blue-700' :
+                          selectedProject.hf_v2.training_type === 'finetune' ? 'bg-green-100 text-green-700' :
+                          'bg-purple-100 text-purple-700'
+                        }`}>
+                          {selectedProject.hf_v2.training_type}
+                        </span>
+                      </div>
+                    )}
+                    {selectedProject.hf_v2.architecture_family && (
+                      <div className="flex justify-between">
+                        <span>Architecture:</span>
+                        <span className="font-medium">{selectedProject.hf_v2.architecture_family}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span>License:</span>
+                      <span className={`font-medium px-2 py-0.5 rounded ${
+                        selectedProject.hf_v2.license_clarity === 'explicit' ? 'bg-green-100 text-green-700' :
+                        selectedProject.hf_v2.license_clarity === 'inherited' ? 'bg-yellow-100 text-yellow-700' :
+                        'bg-red-100 text-red-700'
+                      }`}>
+                        {selectedProject.hf_v2.license_clarity}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Eval Present:</span>
+                      <span className={`font-medium ${selectedProject.hf_v2.eval_present ? 'text-green-700' : 'text-gray-500'}`}>
+                        {selectedProject.hf_v2.eval_present ? '✓ Yes' : '✗ No'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Benchmark:</span>
+                      <span className={`font-medium ${selectedProject.hf_v2.benchmark_mentioned ? 'text-green-700' : 'text-gray-500'}`}>
+                        {selectedProject.hf_v2.benchmark_mentioned ? '✓ Mentioned' : '✗ None'}
+                      </span>
+                    </div>
                   </div>
                 </div>
               )}
