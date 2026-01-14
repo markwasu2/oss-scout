@@ -1261,8 +1261,213 @@ def generate_embeddings(projects):
         print(f"   ⚠️  Failed to generate embeddings: {e}")
         print(f"   Semantic search will be disabled in UI")
 
+def slugify(text):
+    """Convert text to safe filename slug"""
+    # Replace / with __, remove unsafe chars
+    text = text.replace('/', '__').replace('\\', '__')
+    text = re.sub(r'[^\w\-_.]', '_', text)
+    return text
+
+def to_index_item(project):
+    """Convert full project to lightweight index item for shard files"""
+    # Compute "why interesting" string
+    parts = []
+    if project.get('momentum', {}).get('momentum_label') == 'rising':
+        parts.append('Rising')
+    elif project.get('health', {}).get('health_label') == 'alive':
+        parts.append('Alive')
+    
+    contrib_count = project.get('health', {}).get('contributors_90d', 0) or len(project.get('contributors', []))
+    if contrib_count >= 5:
+        parts.append('multi-maintainer')
+    elif contrib_count >= 2:
+        parts.append('team-maintained')
+    
+    tags = project.get('tags', [])
+    modality = next((t for t in tags if t in ['image', 'video', 'audio', '3d', 'multimodal']), None)
+    if modality:
+        parts.append(modality)
+    
+    why = ' • '.join(parts[:4]) or 'Open source project'
+    
+    # Extract license
+    license_str = 'unknown'
+    if project.get('hf', {}).get('license'):
+        lic = project['hf']['license'].lower()
+        if 'mit' in lic:
+            license_str = 'mit'
+        elif 'apache' in lic:
+            license_str = 'apache-2.0'
+        elif 'gpl' in lic:
+            license_str = 'gpl'
+        elif 'cc' in lic:
+            license_str = 'cc'
+        else:
+            license_str = project['hf']['license'][:20]
+    elif 'permissive' in tags:
+        license_str = 'permissive'
+    elif 'restricted' in tags:
+        license_str = 'restricted'
+    
+    return {
+        'key': f"{project['source']}:{project['id']}",
+        'source': project['source'],
+        'id': project['id'],
+        'title': project['name'],
+        'org': project.get('full_name', project['id']).split('/')[0] if '/' in project.get('full_name', project['id']) else '',
+        'url': project['url'],
+        'updated_at': project['updated_at'],
+        'tags_top': tags[:5] if tags else [],
+        'license': license_str,
+        'health_label': project.get('health', {}).get('health_label', 'unknown'),
+        'health_score': project.get('health_score', 0),
+        'momentum_label': project.get('momentum', {}).get('momentum_label', 'flat'),
+        'momentum_score': project.get('momentum', {}).get('momentum_score', 0),
+        'popularity': {
+            'stars': project.get('stars', 0),
+            'forks': project.get('forks', 0),
+            'downloads': project.get('downloads', 0),
+            'likes': project.get('likes', 0),
+        },
+        'scores': {
+            'total': project.get('score', 0),
+            'popularity': project.get('popularity_score', 0),
+            'health': project.get('health_score', 0),
+            'people': project.get('people_score', 0),
+        },
+        'why': why,
+    }
+
+def generate_sharded_index(projects):
+    """Generate manifest, shards, and detail item files for static hosting"""
+    print(f"\n📦 Generating sharded index for {len(projects)} projects...")
+    
+    # Create output directories
+    index_dir = Path("web/public/data/index")
+    shards_dir = index_dir / "shards"
+    items_dir = Path("web/public/data/items")
+    
+    for d in [index_dir, shards_dir, items_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+    
+    # Convert all projects to index items
+    index_items = [to_index_item(p) for p in projects]
+    
+    # 1. Write detail files
+    print(f"   Writing {len(projects)} detail files...")
+    for project in projects:
+        slug = f"{project['source']}__{slugify(project['id'])}.json"
+        detail_file = items_dir / slug
+        with open(detail_file, 'w') as f:
+            json.dump({
+                'key': f"{project['source']}:{project['id']}",
+                'item': project
+            }, f, indent=2)
+    
+    # 2. Generate shards
+    shards_meta = []
+    
+    # Source shards
+    for source in ['github', 'huggingface']:
+        source_items = [item for item in index_items if item['source'] == source]
+        if source_items:
+            shard_file = f"source__{source}.json"
+            with open(shards_dir / shard_file, 'w') as f:
+                json.dump(source_items, f, indent=2)
+            shards_meta.append({
+                'type': 'source',
+                'name': source,
+                'file': shard_file,
+                'count': len(source_items)
+            })
+            print(f"   ✓ source__{source}.json ({len(source_items)} items)")
+    
+    # Tag shards (for high-density tags)
+    tag_counts = {}
+    for item in index_items:
+        for tag in item.get('tags_top', []):
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    
+    # Generate shards for tags with count >= 25
+    min_shard_size = 25
+    for tag, count in tag_counts.items():
+        if count >= min_shard_size:
+            tag_items = [item for item in index_items if tag in item.get('tags_top', [])]
+            shard_file = f"tag__{tag}.json"
+            with open(shards_dir / shard_file, 'w') as f:
+                json.dump(tag_items, f, indent=2)
+            shards_meta.append({
+                'type': 'tag',
+                'name': tag,
+                'file': shard_file,
+                'count': len(tag_items)
+            })
+            print(f"   ✓ tag__{tag}.json ({len(tag_items)} items)")
+    
+    # Lens shards (precomputed)
+    # Compute median popularity for lens filters
+    popularity_scores = [item['scores']['popularity'] for item in index_items]
+    median_popularity = sorted(popularity_scores)[len(popularity_scores) // 2] if popularity_scores else 50
+    
+    lens_definitions = {
+        'hidden_gems': lambda item: (
+            item['health_label'] == 'alive' and
+            item['scores']['popularity'] < median_popularity and
+            item['health_score'] >= 60
+        ),
+        'rising': lambda item: (
+            item['momentum_label'] in ['rising', 'breakout'] and
+            item['health_label'] != 'decaying'
+        ),
+        'breakouts': lambda item: (
+            item['momentum_label'] == 'breakout'
+        ),
+        'production_ready': lambda item: (
+            item['health_label'] in ['alive', 'steady'] and
+            item['health_score'] >= 70 and
+            item['scores']['people'] >= 50
+        ),
+    }
+    
+    for lens_name, lens_filter in lens_definitions.items():
+        lens_items = [item for item in index_items if lens_filter(item)]
+        if lens_items:
+            shard_file = f"lens__{lens_name}.json"
+            with open(shards_dir / shard_file, 'w') as f:
+                json.dump(lens_items, f, indent=2)
+            shards_meta.append({
+                'type': 'lens',
+                'name': lens_name,
+                'file': shard_file,
+                'count': len(lens_items)
+            })
+            print(f"   ✓ lens__{lens_name}.json ({len(lens_items)} items)")
+    
+    # 3. Compute facets
+    facets = compute_facets(projects)
+    
+    # 4. Write manifest
+    manifest = {
+        'generated_at': datetime.utcnow().isoformat() + 'Z',
+        'counts': {
+            'total': len(projects),
+            'github': len([p for p in projects if p['source'] == 'github']),
+            'hf': len([p for p in projects if p['source'] == 'huggingface']),
+        },
+        'facets': facets,
+        'shards': shards_meta,
+    }
+    
+    manifest_file = index_dir / 'manifest.json'
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+    
+    print(f"   ✓ manifest.json")
+    print(f"   📊 Total shards: {len(shards_meta)}")
+    print(f"   📄 Total detail files: {len(projects)}")
+
 def save_projects(projects):
-    """Save projects to data/projects.json with facets and momentum"""
+    """Save projects to data/projects.json with facets and momentum (legacy)"""
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     
@@ -1374,8 +1579,9 @@ if __name__ == "__main__":
             print(f"⚠️  Limiting to top {max_total} projects by score")
             all_projects = sorted(all_projects, key=lambda x: x.get("score", 0), reverse=True)[:max_total]
         
-        # Save
+        # Save (legacy format + new sharded index)
         save_projects(all_projects)
+        generate_sharded_index(all_projects)
         
         # Check for new matches in saved wedges
         check_wedge_alerts(all_projects)
