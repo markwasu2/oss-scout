@@ -3,11 +3,6 @@
  * Client-side embedding generation and similarity computation
  */
 
-import { pipeline, env } from '@xenova/transformers';
-
-// Disable local model storage (use cache in temp dir)
-env.allowLocalModels = false;
-
 // Singleton model instance
 let embedder: any = null;
 let modelLoading: Promise<any> | null = null;
@@ -17,11 +12,23 @@ let modelLoading: Promise<any> | null = null;
  * Uses all-MiniLM-L6-v2 to match server-side embeddings
  */
 export async function loadEmbedder() {
+  // Only run in browser
+  if (typeof window === 'undefined') {
+    throw new Error('Embedder can only run in browser');
+  }
+
   if (embedder) return embedder;
   if (modelLoading) return modelLoading;
 
   modelLoading = (async () => {
     console.log('Loading embedding model...');
+    
+    // Dynamic import to avoid SSR issues
+    const { pipeline, env } = await import('@xenova/transformers');
+    
+    // Disable local model storage (use cache in temp dir)
+    env.allowLocalModels = false;
+    
     embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
     console.log('✓ Embedding model ready');
     return embedder;
