@@ -19,49 +19,57 @@ export type AdapterState = {
  * Initialize data loading - tries sharded first, falls back to legacy
  */
 export async function initializeData(): Promise<AdapterState> {
-  // Try sharded index first
-  try {
-    const manifest = await loadManifest();
-    // Load initial shard (github by default)
-    const initialShards = getShardsForSource('github', manifest);
-    const items = await loadShards(initialShards);
-    
-    console.log(`✓ Using SHARDED mode: ${items.length} items loaded`);
-    
-    return {
-      mode: 'sharded',
-      manifest,
-      items,
-      totalCount: manifest.counts.total,
-      generatedAt: manifest.generated_at,
-    };
-  } catch (error) {
-    console.warn('⚠️ Sharded index not available, falling back to legacy format');
-    console.warn('Run ./pipeline/build.sh to generate sharded index');
-    
-    // Fallback to legacy projects.json
+  // TEMPORARY: Force legacy mode while pipeline generates sharded index
+  // TODO: Re-enable sharded mode after pipeline completes
+  const FORCE_LEGACY = true;
+  
+  if (!FORCE_LEGACY) {
+    // Try sharded index first
     try {
-      const response = await fetch('/data/projects.json');
-      if (!response.ok) {
-        throw new Error(`Legacy projects.json not found: ${response.statusText}`);
-      }
-      const data = await response.json();
+      const manifest = await loadManifest();
+      // Load initial shard (github by default)
+      const initialShards = getShardsForSource('github', manifest);
+      const items = await loadShards(initialShards);
       
-      // Convert legacy projects to index items
-      const items = data.projects.map(legacyToIndexItem);
-      
-      console.log(`✓ Using LEGACY mode: ${items.length} items loaded`);
+      console.log(`✓ Using SHARDED mode: ${items.length} items loaded`);
       
       return {
-        mode: 'legacy',
+        mode: 'sharded',
+        manifest,
         items,
-        totalCount: data.count,
-        generatedAt: data.generated_at,
+        totalCount: manifest.counts.total,
+        generatedAt: manifest.generated_at,
       };
-    } catch (legacyError) {
-      console.error('❌ Failed to load any data format:', legacyError);
-      throw new Error('No data available. Run ./pipeline/build.sh to generate data.');
+    } catch (error) {
+      console.warn('⚠️ Sharded index not available, falling back to legacy format');
     }
+  }
+  
+  // Fallback to legacy projects.json
+  console.log('⚠️ Using LEGACY mode (sharded index not ready)');
+  console.log('Run ./pipeline/build.sh to generate sharded index');
+  
+  try {
+    const response = await fetch('/data/projects.json');
+    if (!response.ok) {
+      throw new Error(`Legacy projects.json not found: ${response.statusText}`);
+    }
+    const data = await response.json();
+    
+    // Convert legacy projects to index items
+    const items = data.projects.map(legacyToIndexItem);
+    
+    console.log(`✓ Loaded ${items.length} projects in legacy mode`);
+    
+    return {
+      mode: 'legacy',
+      items,
+      totalCount: data.count,
+      generatedAt: data.generated_at,
+    };
+  } catch (legacyError) {
+    console.error('❌ Failed to load any data format:', legacyError);
+    throw new Error('No data available. Run ./pipeline/build.sh to generate data.');
   }
 }
 
