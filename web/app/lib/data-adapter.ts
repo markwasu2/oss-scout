@@ -26,6 +26,8 @@ export async function initializeData(): Promise<AdapterState> {
     const initialShards = getShardsForSource('github', manifest);
     const items = await loadShards(initialShards);
     
+    console.log(`✓ Using SHARDED mode: ${items.length} items loaded`);
+    
     return {
       mode: 'sharded',
       manifest,
@@ -34,15 +36,21 @@ export async function initializeData(): Promise<AdapterState> {
       generatedAt: manifest.generated_at,
     };
   } catch (error) {
-    console.warn('Sharded index not available, falling back to legacy format');
+    console.warn('⚠️ Sharded index not available, falling back to legacy format');
+    console.warn('Run ./pipeline/build.sh to generate sharded index');
     
     // Fallback to legacy projects.json
     try {
       const response = await fetch('/data/projects.json');
+      if (!response.ok) {
+        throw new Error(`Legacy projects.json not found: ${response.statusText}`);
+      }
       const data = await response.json();
       
       // Convert legacy projects to index items
       const items = data.projects.map(legacyToIndexItem);
+      
+      console.log(`✓ Using LEGACY mode: ${items.length} items loaded`);
       
       return {
         mode: 'legacy',
@@ -51,8 +59,8 @@ export async function initializeData(): Promise<AdapterState> {
         generatedAt: data.generated_at,
       };
     } catch (legacyError) {
-      console.error('Failed to load any data format:', legacyError);
-      throw new Error('No data available');
+      console.error('❌ Failed to load any data format:', legacyError);
+      throw new Error('No data available. Run ./pipeline/build.sh to generate data.');
     }
   }
 }
