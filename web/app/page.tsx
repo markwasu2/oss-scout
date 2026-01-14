@@ -30,6 +30,7 @@ type Project = {
   popularity_score: number;
   health_score: number;
   people_score: number;
+  growth_rate_weekly?: number;
   health?: {
     days_since_push: number;
     days_since_release: number | null;
@@ -39,6 +40,8 @@ type Project = {
     prs_merged_60d: number;
     issues_opened_60d: number;
     issues_closed_60d: number;
+    pr_merge_latency_days: number | null;  // Health v2
+    issue_close_latency_days: number | null;  // Health v2
     health_score: number;
     health_label: 'alive' | 'steady' | 'decaying';
   };
@@ -959,6 +962,50 @@ export default function Home() {
                         </a>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* Health v2 Metrics (for GitHub) */}
+              {selectedProject.health && (selectedProject.health.pr_merge_latency_days !== null || selectedProject.health.issue_close_latency_days !== null || selectedProject.growth_rate_weekly !== undefined) && (
+                <div>
+                  <h3 className="text-xs font-semibold text-gray-900 mb-2">Health v2 Metrics</h3>
+                  <div className="space-y-1 text-xs text-gray-600">
+                    {selectedProject.health.pr_merge_latency_days !== null && (
+                      <div className="flex justify-between">
+                        <span>PR Merge Latency:</span>
+                        <span className={`font-medium ${
+                          selectedProject.health.pr_merge_latency_days < 7 ? 'text-green-600' :
+                          selectedProject.health.pr_merge_latency_days < 30 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {selectedProject.health.pr_merge_latency_days}d
+                        </span>
+                      </div>
+                    )}
+                    {selectedProject.health.issue_close_latency_days !== null && (
+                      <div className="flex justify-between">
+                        <span>Issue Close Latency:</span>
+                        <span className={`font-medium ${
+                          selectedProject.health.issue_close_latency_days < 14 ? 'text-green-600' :
+                          selectedProject.health.issue_close_latency_days < 60 ? 'text-yellow-600' :
+                          'text-red-600'
+                        }`}>
+                          {selectedProject.health.issue_close_latency_days}d
+                        </span>
+                      </div>
+                    )}
+                    {selectedProject.growth_rate_weekly !== undefined && selectedProject.growth_rate_weekly !== 0 && (
+                      <div className="flex justify-between">
+                        <span>Growth Rate:</span>
+                        <span className="font-medium text-blue-600">
+                          {selectedProject.growth_rate_weekly > 0 ? '+' : ''}{selectedProject.growth_rate_weekly.toFixed(1)}/week
+                        </span>
+                      </div>
+                    )}
+                    <div className="mt-2 pt-2 border-t border-gray-200 text-[10px] text-gray-500">
+                      Responsiveness-focused scoring for investor trust
+                    </div>
                   </div>
                 </div>
               )}

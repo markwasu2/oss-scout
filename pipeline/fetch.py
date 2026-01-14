@@ -466,6 +466,8 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         "prs_merged_60d": 0,
         "issues_opened_60d": 0,
         "issues_closed_60d": 0,
+        "pr_merge_latency_days": None,  # Health v2
+        "issue_close_latency_days": None,  # Health v2
         "health_score": 0.0,
         "health_label": "decaying"
     }
@@ -523,7 +525,7 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         except:
             pass
         
-        # 5. PRs merged 60d
+        # 5. PRs merged 60d + PR merge latency (Health v2)
         try:
             url = f"https://api.github.com/repos/{repo_full_name}/pulls?state=closed&per_page=100&page=1"
             response = requests.get(url, headers=headers, timeout=10)
@@ -531,16 +533,31 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
                 prs = response.json()
                 cutoff_date = datetime.fromisoformat(days_60_ago.replace("Z", "+00:00"))
                 merged_count = 0
+                pr_latencies = []
+                
                 for pr in prs:
                     if pr.get("merged_at"):
                         closed_at = datetime.fromisoformat(pr["closed_at"].replace("Z", "+00:00"))
                         if closed_at >= cutoff_date:
                             merged_count += 1
+                            # Calculate PR latency (days from open to merge)
+                            created_at = datetime.fromisoformat(pr["created_at"].replace("Z", "+00:00"))
+                            merged_at = datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00"))
+                            latency_days = (merged_at - created_at).days
+                            if latency_days >= 0:  # Sanity check
+                                pr_latencies.append(latency_days)
+                
                 health["prs_merged_60d"] = merged_count
+                # Compute median PR merge latency
+                if pr_latencies:
+                    pr_latencies.sort()
+                    health["pr_merge_latency_days"] = pr_latencies[len(pr_latencies) // 2]
+                else:
+                    health["pr_merge_latency_days"] = None
         except:
             pass
         
-        # 6. Issues opened and closed 60d
+        # 6. Issues opened and closed 60d + Issue close latency (Health v2)
         try:
             url = f"https://api.github.com/repos/{repo_full_name}/issues?state=all&since={days_60_ago}&per_page=100&page=1"
             response = requests.get(url, headers=headers, timeout=10)
@@ -549,6 +566,7 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
                 cutoff_date = datetime.fromisoformat(days_60_ago.replace("Z", "+00:00"))
                 opened_count = 0
                 closed_count = 0
+                issue_latencies = []
                 
                 for issue in issues:
                     # Skip PRs
@@ -560,14 +578,24 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
                     if created_at >= cutoff_date:
                         opened_count += 1
                     
-                    # Count closed
+                    # Count closed + calculate latency
                     if issue.get("closed_at"):
                         closed_at = datetime.fromisoformat(issue["closed_at"].replace("Z", "+00:00"))
                         if closed_at >= cutoff_date:
                             closed_count += 1
+                            # Calculate issue close latency
+                            latency_days = (closed_at - created_at).days
+                            if latency_days >= 0:  # Sanity check
+                                issue_latencies.append(latency_days)
                 
                 health["issues_opened_60d"] = opened_count
                 health["issues_closed_60d"] = closed_count
+                # Compute median issue close latency
+                if issue_latencies:
+                    issue_latencies.sort()
+                    health["issue_close_latency_days"] = issue_latencies[len(issue_latencies) // 2]
+                else:
+                    health["issue_close_latency_days"] = None
         except:
             pass
         
@@ -589,14 +617,45 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         contrib_activity = clamp(log1p(health["contributors_90d"]) / log1p(15))
         activity = 0.6 * pr_activity + 0.4 * contrib_activity
         
-        # C) Responsiveness: Issue throughput (not just ratio)
-        # Good if closing more than opening (backlog shrinking)
+        # C) Responsiveness: Latency + Throughput (Health v2)
+        # Reward fast response times, not just volume
+        responsiveness_components = []
+        
+        # C1) PR merge latency (lower is better)
+        if health.get("pr_merge_latency_days") is not None:
+            pr_latency = health["pr_merge_latency_days"]
+            # Good: <7 days, OK: <30 days, Slow: >30 days
+            if pr_latency < 7:
+                pr_resp = 1.0
+            elif pr_latency < 30:
+                pr_resp = clamp(1.0 - (pr_latency - 7) / 23 * 0.4)  # Decay from 1.0 to 0.6
+            else:
+                pr_resp = max(0.2, clamp(1.0 - pr_latency / 90))  # Decay to minimum 0.2
+            responsiveness_components.append(pr_resp)
+        
+        # C2) Issue close latency (lower is better)
+        if health.get("issue_close_latency_days") is not None:
+            issue_latency = health["issue_close_latency_days"]
+            # Good: <14 days, OK: <60 days, Slow: >60 days
+            if issue_latency < 14:
+                issue_resp = 1.0
+            elif issue_latency < 60:
+                issue_resp = clamp(1.0 - (issue_latency - 14) / 46 * 0.4)  # Decay from 1.0 to 0.6
+            else:
+                issue_resp = max(0.2, clamp(1.0 - issue_latency / 180))  # Decay to minimum 0.2
+            responsiveness_components.append(issue_resp)
+        
+        # C3) Issue throughput (closing rate)
         if health["issues_opened_60d"] > 0:
             throughput = health["issues_closed_60d"] / health["issues_opened_60d"]
-            responsiveness = clamp(throughput)  # 1.0 = closing as fast as opening, >1 = catching up
+            throughput_resp = clamp(throughput)  # 1.0 = closing as fast as opening
+            responsiveness_components.append(throughput_resp)
+        
+        # Average responsiveness from available components
+        if responsiveness_components:
+            responsiveness = sum(responsiveness_components) / len(responsiveness_components)
         else:
-            # No issues = either very small or uses discussions
-            responsiveness = 0.7  # Neutral score
+            responsiveness = 0.7  # Neutral (no signals)
         
         # D) Release cadence (if available)
         if health["days_since_release"] is not None:
@@ -611,9 +670,10 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         else:
             release_score = 0.5  # No releases tracked (neutral)
         
-        # Combined health score
-        # Emphasize recency (35%) and activity (30%), responsiveness (20%), releases (15%)
-        health["health_score"] = 0.35 * rec + 0.30 * activity + 0.20 * responsiveness + 0.15 * release_score
+        # Combined health score (Health v2)
+        # Emphasize responsiveness (35%) for investor trust, then recency (30%), activity (20%), releases (15%)
+        # Responsiveness (PR/issue latency) is the key differentiator vs GitHub Trending
+        health["health_score"] = 0.30 * rec + 0.20 * activity + 0.35 * responsiveness + 0.15 * release_score
         
         # 8. Compute health_label
         if health["health_score"] >= 0.70:
@@ -990,6 +1050,25 @@ def save_projects(projects):
         # Compute momentum
         momentum = compute_momentum(current_metrics, previous_metrics)
         project['momentum'] = momentum
+        
+        # Compute growth rate (Health v2)
+        # Calculate stars/downloads per week if we have previous data
+        if previous_metrics.get('fetched_at'):
+            try:
+                prev_date = datetime.fromisoformat(previous_metrics['fetched_at'])
+                current_date = datetime.utcnow()
+                weeks_elapsed = max(1, (current_date - prev_date).days / 7.0)
+                
+                if project['source'] == 'github':
+                    stars_per_week = momentum['stars_delta'] / weeks_elapsed
+                    project['growth_rate_weekly'] = round(stars_per_week, 2)
+                else:  # HuggingFace
+                    downloads_per_week = momentum['downloads_delta'] / weeks_elapsed
+                    project['growth_rate_weekly'] = round(downloads_per_week, 2)
+            except:
+                project['growth_rate_weekly'] = 0.0
+        else:
+            project['growth_rate_weekly'] = 0.0
         
         # Save to new snapshot
         new_snapshot[key] = {
