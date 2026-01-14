@@ -113,21 +113,21 @@ type SavedWedge = {
 
 const DISCOVERY_LENSES: Lens[] = [
   {
-    id: 'all',
-    label: 'All',
-    description: 'All projects',
-    filter: () => true,
+    id: 'hidden-gems-genmedia',
+    label: '✨ Hidden Gems (Video/Audio/3D)',
+    description: 'High health, low popularity generative media projects worth exploring',
+    filter: (p, median) =>
+      (p.tags ?? []).some((t) => ['video', 'audio', '3d', 't2v', 'i2v', 'tts', 'nerf', '3d-gaussian-splatting'].includes(t)) &&
+      p.health_score >= 70 &&
+      p.popularity_score < 40 &&
+      p.people_score >= 60,
     sortKey: 'health',
   },
   {
-    id: 'hidden-gems',
-    label: 'Hidden Gems',
-    description: 'Alive, multi-maintainer, below median popularity',
-    filter: (p, median) =>
-      p.health?.health_label === 'alive' &&
-      p.days_since_update <= 60 &&
-      (p.health?.contributors_90d ?? p.contributors?.length ?? 0) >= 2 &&
-      p.popularity_score < median.popularity,
+    id: 'all',
+    label: 'All Projects',
+    description: 'All generative media projects',
+    filter: () => true,
     sortKey: 'health',
   },
   {
@@ -140,53 +140,78 @@ const DISCOVERY_LENSES: Lens[] = [
     sortKey: 'health',
   },
   {
-    id: 'composable-builders',
-    label: 'Composable Builders',
-    description: 'Node-graph, plugin, library systems in active ecosystems',
+    id: 'rising-stars',
+    label: '🚀 Rising Stars',
+    description: 'Breakout momentum + healthy projects gaining traction fast',
     filter: (p) =>
-      (p.tags ?? []).some((t) =>
-        ['comfyui', 'diffusers', 'automatic1111', 'node-graph', 'plugin', 'library', 'nodes'].includes(t)
-      ),
+      (p.momentum?.momentum_label_v2 === 'breakout' || p.momentum?.momentum_label === 'rising') &&
+      p.health_score >= 60 &&
+      p.days_since_update <= 60,
+    sortKey: 'momentum',
+  },
+  {
+    id: 'modality-video',
+    label: '🎬 Video Generation',
+    description: 'Text-to-video, image-to-video, video diffusion, and editing tools',
+    filter: (p) =>
+      (p.tags ?? []).some((t) => ['video', 't2v', 'i2v', 'video-diffusion', 'text-to-video', 'image-to-video'].includes(t)) &&
+      p.health_score >= 50,
+    sortKey: 'health',
+  },
+  {
+    id: 'modality-audio',
+    label: '🎵 Audio & Voice',
+    description: 'TTS, voice conversion, music generation, and audio processing',
+    filter: (p) =>
+      (p.tags ?? []).some((t) => ['audio', 'tts', 'asr', 'voice-conversion', 'musicgen', 'text-to-speech'].includes(t)) &&
+      p.health_score >= 50,
+    sortKey: 'health',
+  },
+  {
+    id: 'modality-3d',
+    label: '🧊 3D & Spatial',
+    description: 'NeRF, 3D Gaussian splatting, world models, and 3D generation',
+    filter: (p) =>
+      (p.tags ?? []).some((t) => ['3d', 'nerf', '3d-gaussian-splatting', 'world-model', 'simulation'].includes(t)) &&
+      p.health_score >= 50,
     sortKey: 'health',
   },
   {
     id: 'realtime',
-    label: 'Real-Time / Interactive',
-    description: 'Low-latency, interactive, streaming, on-device',
+    label: '⚡ Real-Time Capable',
+    description: 'Fast inference, on-device, streaming - ready for interactive use',
     filter: (p) =>
-      (p.tags ?? []).some((t) => ['realtime', 'real-time', 'interactive', 'streaming', 'on-device'].includes(t)),
+      (p.tags ?? []).some((t) => ['realtime', 'real-time', 'on-device', 'streaming'].includes(t)) &&
+      p.health_score >= 50,
     sortKey: 'health',
   },
   {
-    id: 'research-alive',
-    label: 'Research-Alive',
-    description: 'Benchmark/eval/paper projects still maintained',
-    filter: (p) => {
-      const allText = [...(p.tags ?? []), ...(p.use_cases ?? []), ...(p.topics ?? [])].join(' ');
-      const isResearch = /benchmark|eval|paper|arxiv|metrics|leaderboard/i.test(allText);
-      const isAlive =
-        p.health?.health_label === 'alive' || (p.source === 'huggingface' && p.days_since_update <= 90);
-      return isResearch && isAlive;
-    },
+    id: 'ecosystem-comfyui',
+    label: '🔌 ComfyUI Ecosystem',
+    description: 'Plugins, nodes, and workflows for ComfyUI',
+    filter: (p) =>
+      (p.tags ?? []).includes('comfyui') &&
+      p.health_score >= 50,
     sortKey: 'health',
   },
   {
     id: 'single-maintainer-risk',
-    label: 'Single-Maintainer Risk',
-    description: 'Popular but maintained by ≤1 person',
+    label: '⚠️ Single-Maintainer Risk',
+    description: 'Popular generative models with ≤1 active maintainer (bus factor concern)',
     filter: (p, median) =>
-      (p.health?.contributors_90d ?? p.contributors?.length ?? 0) <= 1 && p.popularity_score > median.popularity,
+      (p.health?.contributors_90d ?? p.contributors?.length ?? 0) <= 1 && 
+      p.popularity_score > median.popularity &&
+      (p.tags ?? []).some((t) => ['video', 'audio', '3d', 't2v', 'tts', 'nerf'].includes(t)),
     sortKey: 'popularity',
   },
   {
-    id: 'rising',
-    label: 'Rising',
-    description: 'High momentum, active growth, not decaying',
+    id: 'zombies',
+    label: '🧟 Zombies',
+    description: 'Popular but inactive (health < 30, popularity ≥ 70) - use with caution',
     filter: (p) =>
-      p.momentum?.momentum_label === 'rising' &&
-      p.days_since_update <= 60 &&
-      p.health?.health_label !== 'decaying',
-    sortKey: 'health',  // Will use momentum sort when available
+      p.popularity_score >= 70 &&
+      p.health_score < 30,
+    sortKey: 'popularity',
   },
   {
     id: 'hf-enterprise',
@@ -327,7 +352,7 @@ export default function Home() {
   const [maxDaysOld, setMaxDaysOld] = useState(90);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [contributorFilter, setContributorFilter] = useState<string | null>(null);
-  const [activeLens, setActiveLens] = useState<string>('all');
+  const [activeLens, setActiveLens] = useState<string>('hidden-gems'); // Default to Hidden Gems for generative media
   const [minStars, setMinStars] = useState(0);
   const [minContributors, setMinContributors] = useState(0);
   const [leftRailOpen, setLeftRailOpen] = useState(true);
@@ -794,7 +819,7 @@ export default function Home() {
   };
 
   if (!data) {
-    return (
+  return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-gray-600">Loading projects...</div>
       </div>
@@ -1168,7 +1193,7 @@ export default function Home() {
                     {item.popularity.stars > 0 && <span>⭐ {item.popularity.stars.toLocaleString()}</span>}
                     {item.popularity.likes > 0 && <span>❤️ {item.popularity.likes.toLocaleString()}</span>}
                     {item.popularity.downloads > 0 && <span>⬇️ {item.popularity.downloads.toLocaleString()}</span>}                  </div>
-                </div>
+        </div>
               ))
             )}
           </div>
@@ -1197,8 +1222,8 @@ export default function Home() {
                 <div className="flex flex-wrap gap-2">
                   <a
                     href={selectedProject.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+            target="_blank"
+            rel="noopener noreferrer"
                     className="inline-block px-3 py-1 bg-black text-white rounded text-xs font-medium hover:bg-gray-800"
                   >
                     Open {selectedProject.source === 'github' ? 'Repo' : 'Model'} →
@@ -1350,13 +1375,13 @@ export default function Home() {
                       <div className="mt-2">
                         <a
                           href={selectedProject.hf.paper}
-                          target="_blank"
-                          rel="noopener noreferrer"
+            target="_blank"
+            rel="noopener noreferrer"
                           className="text-blue-600 hover:text-blue-800 underline"
-                        >
+          >
                           📄 Paper
-                        </a>
-                      </div>
+          </a>
+        </div>
                     )}
                   </div>
                 </div>
