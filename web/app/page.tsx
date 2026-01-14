@@ -56,6 +56,7 @@ type Project = {
     likes_delta: number;
     momentum_score: number;
     momentum_label: 'rising' | 'steady' | 'flat';
+    momentum_label_v2?: 'breakout' | 'rising' | 'flat';  // Momentum v2
     momentum_reason?: string;  // Momentum v3
   };
   hf?: {
@@ -88,7 +89,7 @@ type Lens = {
   label: string;
   description: string;
   filter: (p: Project, median: { popularity: number }) => boolean;
-  sortKey: 'health' | 'popularity' | 'people' | 'newest';
+  sortKey: 'health' | 'popularity' | 'people' | 'newest' | 'momentum';
 };
 
 // Saved Wedge (persistent filter state)
@@ -352,7 +353,7 @@ export default function Home() {
   const [maxDaysOld, setMaxDaysOld] = useState(90);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [contributorFilter, setContributorFilter] = useState<string | null>(null);
-  const [activeLens, setActiveLens] = useState<string>('hidden-gems'); // Default to Hidden Gems for generative media
+  const [activeLens, setActiveLens] = useState<string>('hidden-gems-genmedia'); // Default to Generative Media Hidden Gems
   const [minStars, setMinStars] = useState(0);
   const [minContributors, setMinContributors] = useState(0);
   const [leftRailOpen, setLeftRailOpen] = useState(true);
