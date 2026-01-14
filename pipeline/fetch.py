@@ -1132,6 +1132,51 @@ def compute_facets(projects):
     
     return facets
 
+def check_wedge_alerts(current_projects):
+    """
+    Check for new matches in saved wedges and update alerts.
+    This reads the web app's localStorage wedges (if exported) and detects new matches.
+    For MVP: we'll write to alerts.json with project IDs that are new since last run.
+    """
+    alerts_path = Path("data/alerts.json")
+    last_run_path = Path("data/cache/last_run_projects.json")
+    
+    # Load previous run's project IDs
+    last_run_ids = set()
+    if last_run_path.exists():
+        try:
+            with open(last_run_path, 'r') as f:
+                last_run = json.load(f)
+                last_run_ids = {p['id'] for p in last_run.get('projects', [])}
+        except Exception as e:
+            print(f"⚠️  Could not load last run data: {e}")
+    
+    # Find new project IDs (not in last run)
+    current_ids = {p['id'] for p in current_projects}
+    new_ids = current_ids - last_run_ids
+    
+    if new_ids:
+        print(f"\n🔔 Detected {len(new_ids)} new projects since last run")
+        
+        # Write alerts (simple format for now)
+        alerts = {
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "new_project_count": len(new_ids),
+            "new_project_ids": sorted(list(new_ids)),
+        }
+        
+        with open(alerts_path, 'w') as f:
+            json.dump(alerts, f, indent=2)
+        
+        print(f"   Alerts written to {alerts_path}")
+    else:
+        print(f"\n✓ No new projects detected (compared to last run)")
+    
+    # Save current run for next comparison
+    last_run_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(last_run_path, 'w') as f:
+        json.dump({"projects": [{"id": p['id']} for p in current_projects]}, f)
+
 def save_projects(projects):
     """Save projects to data/projects.json with facets and momentum"""
     data_dir = Path("data")
@@ -1247,6 +1292,9 @@ if __name__ == "__main__":
         
         # Save
         save_projects(all_projects)
+        
+        # Check for new matches in saved wedges
+        check_wedge_alerts(all_projects)
         
         print(f"\n✅ Pipeline completed successfully!")
         print(f"   Total: {len(all_projects)} items")

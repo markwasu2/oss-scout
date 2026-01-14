@@ -79,6 +79,26 @@ type Lens = {
   sortKey: 'health' | 'popularity' | 'people' | 'newest';
 };
 
+// Saved Wedge (persistent filter state)
+type SavedWedge = {
+  id: string;
+  name: string;
+  createdAt: string;
+  state: {
+    searchQuery: string;
+    sortBy: 'popularity' | 'health' | 'people' | 'newest' | 'momentum';
+    sourceFilter: 'all' | 'github' | 'huggingface';
+    healthFilter: 'all' | 'hot' | 'steady' | 'decaying';
+    useCaseFilter: string[];
+    tagFilters: string[];
+    maxDaysOld: number;
+    activeLens: string;
+    minStars: number;
+    minContributors: number;
+  };
+  newMatchCount?: number;
+};
+
 const DISCOVERY_LENSES: Lens[] = [
   {
     id: 'all',
@@ -265,6 +285,30 @@ export default function Home() {
   const [minStars, setMinStars] = useState(0);
   const [minContributors, setMinContributors] = useState(0);
   const [leftRailOpen, setLeftRailOpen] = useState(true);
+  const [savedWedges, setSavedWedges] = useState<SavedWedge[]>([]);
+  const [showSaveWedgeModal, setShowSaveWedgeModal] = useState(false);
+  const [newWedgeName, setNewWedgeName] = useState('');
+  const [showWedgesPanel, setShowWedgesPanel] = useState(false);
+
+  // Load saved wedges from localStorage
+  useEffect(() => {
+    const stored = localStorage.getItem('oss-scout-wedges');
+    if (stored) {
+      try {
+        const wedges = JSON.parse(stored) as SavedWedge[];
+        setSavedWedges(wedges);
+      } catch (e) {
+        console.error('Failed to parse saved wedges:', e);
+      }
+    }
+  }, []);
+
+  // Save wedges to localStorage whenever they change
+  useEffect(() => {
+    if (savedWedges.length > 0) {
+      localStorage.setItem('oss-scout-wedges', JSON.stringify(savedWedges));
+    }
+  }, [savedWedges]);
 
   // Load data
   useEffect(() => {
@@ -273,6 +317,47 @@ export default function Home() {
       .then((data) => setData(data))
       .catch((err) => console.error('Failed to load projects:', err));
   }, []);
+
+  // Load alerts and update wedge match counts
+  useEffect(() => {
+    if (!data || savedWedges.length === 0) return;
+
+    fetch('/data/alerts.json')
+      .then((res) => res.json())
+      .then((alerts) => {
+        if (alerts.new_project_ids && alerts.new_project_ids.length > 0) {
+          const newIds = new Set(alerts.new_project_ids);
+          
+          // For each wedge, count how many new projects match its filters
+          setSavedWedges((prev) =>
+            prev.map((wedge) => {
+              // Apply wedge filters to new projects
+              const newProjects = data.projects.filter((p) => newIds.has(p.id));
+              const matchingNew = newProjects.filter((p) => {
+                // Apply wedge filters (simplified - matches the main filter logic)
+                if (wedge.state.sourceFilter !== 'all' && p.source !== wedge.state.sourceFilter) return false;
+                if (wedge.state.healthFilter !== 'all') {
+                  const healthLabel = p.health?.health_label;
+                  if (!healthLabel) return wedge.state.healthFilter !== 'hot';
+                  if (wedge.state.healthFilter === 'hot' && healthLabel !== 'alive') return false;
+                  if (wedge.state.healthFilter === 'steady' && healthLabel !== 'steady') return false;
+                  if (wedge.state.healthFilter === 'decaying' && healthLabel !== 'decaying') return false;
+                }
+                if (wedge.state.tagFilters.length > 0 && !wedge.state.tagFilters.some((tag) => p.tags?.includes(tag))) return false;
+                if (p.days_since_update > wedge.state.maxDaysOld && p.days_since_update !== 0) return false;
+                return true;
+              });
+
+              return { ...wedge, newMatchCount: matchingNew.length };
+            })
+          );
+        }
+      })
+      .catch((err) => {
+        // Alerts file might not exist yet - that's okay
+        console.log('No alerts file yet:', err);
+      });
+  }, [data, savedWedges.length]); // Only rerun when data loads or wedges are added/removed
 
   // Handle URL params (for contributor filter from graph)
   useEffect(() => {
@@ -470,6 +555,57 @@ export default function Home() {
     setMaxDaysOld(90);
   };
 
+  // Wedge management functions
+  const saveCurrentWedge = () => {
+    if (!newWedgeName.trim()) return;
+    
+    const wedge: SavedWedge = {
+      id: `wedge-${Date.now()}`,
+      name: newWedgeName.trim(),
+      createdAt: new Date().toISOString(),
+      state: {
+        searchQuery,
+        sortBy,
+        sourceFilter,
+        healthFilter,
+        useCaseFilter,
+        tagFilters,
+        maxDaysOld,
+        activeLens,
+        minStars,
+        minContributors,
+      },
+      newMatchCount: 0,
+    };
+    
+    setSavedWedges((prev) => [...prev, wedge]);
+    setNewWedgeName('');
+    setShowSaveWedgeModal(false);
+  };
+
+  const loadWedge = (wedge: SavedWedge) => {
+    setSearchQuery(wedge.state.searchQuery);
+    setSortBy(wedge.state.sortBy);
+    setSourceFilter(wedge.state.sourceFilter);
+    setHealthFilter(wedge.state.healthFilter);
+    setUseCaseFilter(wedge.state.useCaseFilter);
+    setTagFilters(wedge.state.tagFilters);
+    setMaxDaysOld(wedge.state.maxDaysOld);
+    setActiveLens(wedge.state.activeLens);
+    setMinStars(wedge.state.minStars);
+    setMinContributors(wedge.state.minContributors);
+    
+    // Clear new match count
+    setSavedWedges((prev) =>
+      prev.map((w) => (w.id === wedge.id ? { ...w, newMatchCount: 0 } : w))
+    );
+    setShowWedgesPanel(false);
+  };
+
+  const deleteWedge = (wedgeId: string) => {
+    setSavedWedges((prev) => prev.filter((w) => w.id !== wedgeId));
+  };
+
   if (!data) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -539,6 +675,28 @@ export default function Home() {
             >
               Graph
             </a>
+
+            {/* Saved Wedges */}
+            <button
+              onClick={() => setShowWedgesPanel(!showWedgesPanel)}
+              className="relative px-3 py-1.5 border border-gray-300 rounded text-sm font-medium hover:bg-gray-50 transition-colors"
+            >
+              Wedges
+              {savedWedges.some((w) => (w.newMatchCount ?? 0) > 0) && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {savedWedges.reduce((sum, w) => sum + (w.newMatchCount ?? 0), 0)}
+                </span>
+              )}
+            </button>
+
+            {/* Save Current View */}
+            <button
+              onClick={() => setShowSaveWedgeModal(true)}
+              className="px-3 py-1.5 border border-blue-500 text-blue-600 rounded text-sm font-medium hover:bg-blue-50 transition-colors"
+              title="Save current filter state"
+            >
+              Save
+            </button>
 
             {/* Metadata */}
             <div className="hidden md:block text-xs text-gray-500">
@@ -1079,6 +1237,139 @@ export default function Home() {
           </aside>
         )}
       </div>
+
+      {/* Save Wedge Modal */}
+      {showSaveWedgeModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-96 max-w-[90vw]">
+            <h2 className="text-lg font-bold text-gray-900 mb-4">Save Current View</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Give this wedge a memorable name. You'll be able to quickly return to this exact filter/sort combination.
+            </p>
+            <input
+              type="text"
+              placeholder="e.g., Rising ComfyUI Nodes"
+              value={newWedgeName}
+              onChange={(e) => setNewWedgeName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && saveCurrentWedge()}
+              className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent mb-4"
+              autoFocus
+            />
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => {
+                  setShowSaveWedgeModal(false);
+                  setNewWedgeName('');
+                }}
+                className="px-4 py-2 border border-gray-300 rounded text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveCurrentWedge}
+                disabled={!newWedgeName.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wedges Panel */}
+      {showWedgesPanel && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-[600px] max-w-[90vw] max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold text-gray-900">Saved Wedges</h2>
+              <button
+                onClick={() => setShowWedgesPanel(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {savedWedges.length === 0 ? (
+              <div className="text-center py-8 text-gray-500 text-sm">
+                <p className="mb-2">No saved wedges yet.</p>
+                <p>Click "Save" in the header to save your current filter state.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {savedWedges.map((wedge) => (
+                  <div
+                    key={wedge.id}
+                    className="border border-gray-200 rounded-lg p-4 hover:border-gray-400 transition-colors"
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-semibold text-gray-900">{wedge.name}</h3>
+                          {(wedge.newMatchCount ?? 0) > 0 && (
+                            <span className="px-2 py-0.5 bg-red-500 text-white text-xs font-bold rounded-full">
+                              {wedge.newMatchCount} new
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Created {new Date(wedge.createdAt).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => deleteWedge(wedge.id)}
+                        className="text-red-600 hover:text-red-800 text-xs font-medium ml-2"
+                        title="Delete wedge"
+                      >
+                        Delete
+                      </button>
+                    </div>
+
+                    {/* Show active filters */}
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {wedge.state.activeLens !== 'all' && (
+                        <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
+                          Lens: {DISCOVERY_LENSES.find((l) => l.id === wedge.state.activeLens)?.label}
+                        </span>
+                      )}
+                      {wedge.state.sourceFilter !== 'all' && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">
+                          {wedge.state.sourceFilter}
+                        </span>
+                      )}
+                      {wedge.state.healthFilter !== 'all' && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">
+                          {wedge.state.healthFilter}
+                        </span>
+                      )}
+                      {wedge.state.tagFilters.length > 0 && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">
+                          {wedge.state.tagFilters.length} tags
+                        </span>
+                      )}
+                      {wedge.state.searchQuery && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded">
+                          search: "{wedge.state.searchQuery}"
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => loadWedge(wedge)}
+                      className="w-full px-3 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700 transition-colors"
+                    >
+                      Load This Wedge
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
