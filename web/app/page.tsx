@@ -3,6 +3,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { embedQuery, loadEmbeddings, findTopSimilar, cosineSimilarity, type EmbeddingsData } from './lib/semantic';
+import { initializeData, loadLensItems, loadSourceItems, getProjectDetails, type AdapterState } from './lib/data-adapter';
+import type { IndexItem } from './lib/data';
 
 type Project = {
   source: string;
@@ -273,6 +275,10 @@ function computeRelated(selected: Project, allProjects: Project[]): Project[] {
 export default function Home() {
   const searchParams = useSearchParams();
   const [data, setData] = useState<ProjectData | null>(null);
+  const [adapter, setAdapter] = useState<AdapterState | null>(null);
+  const [indexItems, setIndexItems] = useState<IndexItem[]>([]);
+  const [displayedCount, setDisplayedCount] = useState(50);
+  const itemsPerPage = 50;
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<'popularity' | 'health' | 'people' | 'newest' | 'momentum'>('health');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'github' | 'huggingface'>('all');
@@ -317,13 +323,70 @@ export default function Home() {
     }
   }, [savedWedges]);
 
-  // Load data
+  // Load data (sharded or legacy)
   useEffect(() => {
-    fetch('/data/projects.json')
-      .then((res) => res.json())
-      .then((data) => setData(data))
-      .catch((err) => console.error('Failed to load projects:', err));
+    initializeData()
+      .then((adapterState) => {
+        setAdapter(adapterState);
+        setIndexItems(adapterState.items);
+        console.log(`✓ Data loaded: ${adapterState.mode} mode, ${adapterState.items.length} items`);
+        
+        // For legacy mode compatibility, also set data state
+        setData({
+          generated_at: adapterState.generatedAt,
+          count: adapterState.totalCount,
+          projects: []
+        });
+      })
+      .catch((err) => {
+        console.error('Failed to initialize data:', err);
+      });
   }, []);
+
+  // Reload items when lens or source changes (sharded mode only)
+  useEffect(() => {
+    if (!adapter || adapter.mode === 'legacy') return;
+    if (!adapter.manifest) return;
+
+    // Determine which shards to load
+    let shardsToLoad: string[] = [];
+
+    if (activeLens && activeLens !== 'all') {
+      // Try to load lens shard
+      const lensShard = adapter.manifest.shards.find(
+        (s) => s.type === 'lens' && s.name === activeLens
+      );
+      if (lensShard) {
+        shardsToLoad = [lensShard.file];
+      }
+    }
+
+    // If no lens shard or lens is 'all', load by source
+    if (shardsToLoad.length === 0) {
+      if (sourceFilter === 'all') {
+        const githubShard = adapter.manifest.shards.find((s) => s.type === 'source' && s.name === 'github');
+        const hfShard = adapter.manifest.shards.find((s) => s.type === 'source' && s.name === 'huggingface');
+        if (githubShard) shardsToLoad.push(githubShard.file);
+        if (hfShard) shardsToLoad.push(hfShard.file);
+      } else {
+        const shard = adapter.manifest.shards.find(
+          (s) => s.type === 'source' && s.name === sourceFilter
+        );
+        if (shard) shardsToLoad = [shard.file];
+      }
+    }
+
+    // Load shards
+    if (shardsToLoad.length > 0) {
+      import('./lib/data').then(({ loadShards }) => {
+        loadShards(shardsToLoad).then((items) => {
+          setIndexItems(items);
+          setDisplayedCount(50); // Reset pagination
+          console.log(`✓ Loaded ${items.length} items from ${shardsToLoad.length} shard(s)`);
+        });
+      });
+    }
+  }, [activeLens, sourceFilter, adapter]);
 
   // Load embeddings for semantic search
   useEffect(() => {
@@ -410,21 +473,18 @@ export default function Home() {
     }
   }, [searchParams]);
 
-  // Available use cases
+  // Available use cases (not in index items, skip for now)
   const allUseCases = useMemo(() => {
-    if (!data) return [];
-    const cases = new Set<string>();
-    data.projects.forEach((p) => p.use_cases.forEach((uc) => cases.add(uc)));
-    return Array.from(cases).sort();
-  }, [data]);
+    return [];
+  }, []);
 
   // Available tags with counts (categorized)
   const availableTags = useMemo(() => {
-    if (!data) return { modality: [], task: [], ecosystem: [], control: [], pipeline: [], license: [] };
+    if (indexItems.length === 0) return { modality: [], task: [], ecosystem: [], control: [], pipeline: [], license: [] };
     
     const tagCounts = new Map<string, number>();
-    data.projects.forEach((p) => {
-      p.tags?.forEach((tag) => {
+    indexItems.forEach((item) => {
+      item.tags_top.forEach((tag) => {
         tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
       });
     });
@@ -453,16 +513,16 @@ export default function Home() {
 
   // Compute median popularity
   const medianPopularity = useMemo(() => {
-    if (!data) return 50;
-    const scores = data.projects.map((p) => p.popularity_score).sort((a, b) => a - b);
+    if (indexItems.length === 0) return 50;
+    const scores = indexItems.map((item) => item.scores.popularity).sort((a, b) => a - b);
     return scores[Math.floor(scores.length / 2)] ?? 50;
-  }, [data]);
+  }, [indexItems]);
 
-  // Filtered and sorted projects
-  const filteredProjects = useMemo(() => {
-    if (!data) return [];
+  // Filtered and sorted index items
+  const filteredItems = useMemo(() => {
+    if (indexItems.length === 0) return [];
 
-    let filtered = data.projects;
+    let filtered = indexItems;
     let semanticScores: Map<string, number> | null = null;
 
     // Search (semantic or keyword)
@@ -474,39 +534,36 @@ export default function Home() {
         );
 
         semanticScores = new Map();
-        filtered = filtered.filter((p) => {
-          const key = `${p.source}:${p.id}`;
-          const vec = embeddingsMap.get(key);
+        filtered = filtered.filter((item) => {
+          const vec = embeddingsMap.get(item.key);
           if (!vec) return false;
 
           const similarity = cosineSimilarity(semanticQueryVec, vec);
-          semanticScores!.set(p.id, similarity);
+          semanticScores!.set(item.id, similarity);
 
           // Filter threshold: only show items with similarity > 0.3
           return similarity > 0.3;
         });
       } else {
-        // Keyword search
+        // Keyword search on index items
         const q = searchQuery.toLowerCase();
-        filtered = filtered.filter(
-          (p) =>
-            p.name.toLowerCase().includes(q) ||
-            p.description.toLowerCase().includes(q) ||
-            p.topics.some((t) => t.toLowerCase().includes(q))
+        filtered = filtered.filter((item) =>
+          item.title.toLowerCase().includes(q) ||
+          item.why.toLowerCase().includes(q) ||
+          item.tags_top.some((t) => t.toLowerCase().includes(q))
         );
       }
     }
 
-    // Source filter
+    // Source filter (already handled by shard loading in sharded mode)
     if (sourceFilter !== 'all') {
-      filtered = filtered.filter((p) => p.source === sourceFilter);
+      filtered = filtered.filter((item) => item.source === sourceFilter);
     }
 
     // Health filter
     if (healthFilter !== 'all') {
-      filtered = filtered.filter((p) => {
-        const healthLabel = p.health?.health_label;
-        if (!healthLabel) return healthFilter !== 'hot';
+      filtered = filtered.filter((item) => {
+        const healthLabel = item.health_label;
         if (healthFilter === 'hot') return healthLabel === 'alive';
         if (healthFilter === 'steady') return healthLabel === 'steady';
         if (healthFilter === 'decaying') return healthLabel === 'decaying';
@@ -514,55 +571,26 @@ export default function Home() {
       });
     }
 
-    // Use case filter
-    if (useCaseFilter.length > 0) {
-      filtered = filtered.filter((p) =>
-        useCaseFilter.some((uc) => p.use_cases.includes(uc))
-      );
-    }
-
     // Tag filters
     if (tagFilters.length > 0) {
-      filtered = filtered.filter((p) =>
-        tagFilters.some((tag) => p.tags?.includes(tag))
+      filtered = filtered.filter((item) =>
+        tagFilters.some((tag) => item.tags_top.includes(tag))
       );
     }
-
-    // Contributor filter
-    if (contributorFilter) {
-      filtered = filtered.filter((p) =>
-        p.contributors?.some((c) => c.login === contributorFilter)
-      );
-    }
-
-    // Activity filter
-    filtered = filtered.filter((p) => 
-      p.days_since_update === 0 || p.days_since_update <= maxDaysOld
-    );
 
     // Min stars/downloads
     if (minStars > 0) {
-      filtered = filtered.filter((p) => {
-        const metric = p.stars ?? p.downloads ?? 0;
+      filtered = filtered.filter((item) => {
+        const metric = item.popularity.stars || item.popularity.downloads || 0;
         return metric >= minStars;
       });
     }
 
-    // Min contributors
-    if (minContributors > 0) {
-      filtered = filtered.filter((p) => {
-        const count = p.health?.contributors_90d ?? p.contributors?.length ?? 0;
-        return count >= minContributors;
-      });
-    }
-
-    // Apply lens filter
-    if (activeLens && activeLens !== 'all') {
-      const lens = DISCOVERY_LENSES.find((l) => l.id === activeLens);
-      if (lens) {
-        filtered = filtered.filter((p) => lens.filter(p, { popularity: medianPopularity }));
-      }
-    }
+    // Note: contributor filter and use_cases are only available in full details
+    // For now, skip these filters in index view (will load details if needed)
+    
+    // Lens filter - most lenses are already loaded as shards in sharded mode
+    // Just apply additional client-side filtering if needed
 
     // Sort
     filtered = [...filtered].sort((a, b) => {
@@ -573,23 +601,31 @@ export default function Home() {
         return simB - simA;
       }
 
-      // Otherwise use selected sort
-      if (sortBy === 'popularity') return b.popularity_score - a.popularity_score;
-      if (sortBy === 'health') return b.health_score - a.health_score;
-      if (sortBy === 'people') return b.people_score - a.people_score;
-      if (sortBy === 'newest') return a.days_since_update - b.days_since_update;
-      if (sortBy === 'momentum') return (b.momentum?.momentum_score ?? 0) - (a.momentum?.momentum_score ?? 0);
+      // Otherwise use selected sort (use IndexItem fields)
+      if (sortBy === 'popularity') return b.scores.popularity - a.scores.popularity;
+      if (sortBy === 'health') return b.scores.health - a.scores.health;
+      if (sortBy === 'people') return b.scores.people - a.scores.people;
+      if (sortBy === 'newest') {
+        const aTime = new Date(a.updated_at).getTime();
+        const bTime = new Date(b.updated_at).getTime();
+        return bTime - aTime;
+      }
+      if (sortBy === 'momentum') return b.momentum_score - a.momentum_score;
       return 0;
     });
 
     return filtered;
-  }, [data, searchQuery, sortBy, sourceFilter, healthFilter, useCaseFilter, tagFilters, contributorFilter, maxDaysOld, minStars, minContributors, activeLens, medianPopularity, semanticSearchEnabled, semanticQueryVec, embeddingsData]);
+  }, [indexItems, searchQuery, sortBy, sourceFilter, healthFilter, tagFilters, minStars, activeLens, medianPopularity, semanticSearchEnabled, semanticQueryVec, embeddingsData]);
 
-  // Related projects (for selected project)
-  const relatedProjects = useMemo(() => {
-    if (!data || !selectedProject) return [];
-    return computeRelated(selectedProject, data.projects);
-  }, [data, selectedProject]);
+  // Paginated items
+  const paginatedItems = useMemo(() => {
+    return filteredItems.slice(0, displayedCount);
+  }, [filteredItems, displayedCount]);
+
+  // Related projects (for selected project - will lazy load if needed)
+  const relatedProjects = useMemo<Project[]>(() => {
+    return []; // TODO: Implement with detail loading
+  }, [selectedProject]);
 
   const toggleUseCase = (useCase: string) => {
     setUseCaseFilter((prev) =>
@@ -676,6 +712,16 @@ export default function Home() {
 
   const deleteWedge = (wedgeId: string) => {
     setSavedWedges((prev) => prev.filter((w) => w.id !== wedgeId));
+  };
+
+  // Load full project details
+  const loadProjectDetail = async (item: IndexItem) => {
+    if (!adapter) return;
+    
+    const detail = await getProjectDetails(item.key, adapter.mode, []);
+    if (detail) {
+      setSelectedProject(detail);
+    }
   };
 
   // Find similar projects to the selected one
@@ -818,7 +864,7 @@ export default function Home() {
 
             {/* Metadata */}
             <div className="hidden md:block text-xs text-gray-500">
-              {filteredProjects.length} / {data.count}
+              {filteredItems.length} / {adapter?.totalCount || 0}
             </div>
           </div>
         </div>
@@ -1018,17 +1064,17 @@ export default function Home() {
 
           {/* Cards */}
           <div className="space-y-3">
-            {filteredProjects.length === 0 ? (
+            {paginatedItems.length === 0 ? (
               <div className="text-center text-gray-500 py-12 bg-white border border-gray-200 rounded">
                 No projects match your filters
               </div>
             ) : (
-              filteredProjects.map((project) => (
+              paginatedItems.map((item) => (
                 <div
-                  key={project.id}
-                  onClick={() => setSelectedProject(project)}
+                  key={item.id}
+                  onClick={() => loadProjectDetail(item)}
                   className={`bg-white border rounded p-4 cursor-pointer transition-all hover:shadow-sm ${
-                    selectedProject?.id === project.id
+                    selectedProject?.id === item.id
                       ? 'ring-2 ring-black'
                       : 'border-gray-200 hover:border-gray-400'
                   }`}
@@ -1036,36 +1082,36 @@ export default function Home() {
                   {/* Title + badges */}
                   <div className="mb-2">
                     <h3 className="font-bold text-gray-900 mb-1">
-                      {project.full_name || project.name}
+                      {item.org ? `${item.org}/${item.title}` : item.title || item.title}
                     </h3>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs font-medium">
-                        {project.source === 'github' ? 'GitHub' : 'HF'}
+                        {item.source === 'github' ? 'GitHub' : 'HF'}
                       </span>
-                      {project.health?.health_label && (
+                      {item.health_label && (
                         <span
                           className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            project.health.health_label === 'alive'
+                            item.health_label === 'alive'
                               ? 'bg-green-100 text-green-700'
-                              : project.health.health_label === 'steady'
+                              : item.health_label === 'steady'
                               ? 'bg-yellow-100 text-yellow-700'
                               : 'bg-red-100 text-red-700'
                           }`}
                         >
-                          {project.health.health_label}
+                          {item.health_label}
                         </span>
                       )}
-                      {project.momentum?.momentum_label === 'rising' && (
+                      {item.momentum_label === 'rising' && (
                         <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
                           ⬆️ rising
                         </span>
                       )}
-                      {getLicenseLabel(project) && (
+                      {item.license && item.license !== "unknown" && (
                         <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
-                          📄 {getLicenseLabel(project)}
+                          📄 {item.license && item.license !== "unknown"}
                         </span>
                       )}
-                      {(project.tags ?? []).slice(0, 2).map((tag) => (
+                      {item.tags_top.slice(0, 2).map((tag) => (
                         <span key={tag} className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
                           {tag}
                         </span>
@@ -1075,21 +1121,30 @@ export default function Home() {
 
                   {/* Why interesting */}
                   <p className="text-sm text-gray-600 mb-2 italic">
-                    {computeWhyInteresting(project)}
+                    {item.why}
                   </p>
 
                   {/* Metrics */}
                   <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
-                    {project.stars !== undefined && <span>⭐ {project.stars.toLocaleString()}</span>}
-                    {project.likes !== undefined && <span>❤️ {project.likes.toLocaleString()}</span>}
-                    {project.downloads !== undefined && <span>⬇️ {project.downloads.toLocaleString()}</span>}
-                    {project.contributors && <span>👥 {project.contributors.length}</span>}
-                    <span>📅 {project.days_since_update}d</span>
-                  </div>
+                    {item.popularity.stars > 0 && <span>⭐ {item.popularity.stars.toLocaleString()}</span>}
+                    {item.popularity.likes > 0 && <span>❤️ {item.popularity.likes.toLocaleString()}</span>}
+                    {item.popularity.downloads > 0 && <span>⬇️ {item.popularity.downloads.toLocaleString()}</span>}                  </div>
                 </div>
               ))
             )}
           </div>
+
+          {/* Load More Button */}
+          {filteredItems.length > displayedCount && (
+            <div className="mt-6 text-center">
+              <button
+                onClick={() => setDisplayedCount((prev) => prev + itemsPerPage)}
+                className="px-6 py-2 bg-black text-white rounded text-sm font-medium hover:bg-gray-800 transition-colors"
+              >
+                Load More ({filteredItems.length - displayedCount} remaining)
+              </button>
+            </div>
+          )}
         </main>
 
         {/* Right Panel - Details */}
