@@ -342,6 +342,7 @@ export default function Home() {
   const [data, setData] = useState<ProjectData | null>(null);
   const [adapter, setAdapter] = useState<AdapterState | null>(null);
   const [indexItems, setIndexItems] = useState<IndexItem[]>([]);
+  const [legacyProjects, setLegacyProjects] = useState<Project[]>([]);
   const [displayedCount, setDisplayedCount] = useState(50);
   const itemsPerPage = 50;
   const [searchQuery, setSearchQuery] = useState('');
@@ -396,12 +397,27 @@ export default function Home() {
         setIndexItems(adapterState.items);
         console.log(`✓ Data loaded: ${adapterState.mode} mode, ${adapterState.items.length} items`);
         
-        // For legacy mode compatibility, also set data state
-        setData({
-          generated_at: adapterState.generatedAt,
-          count: adapterState.totalCount,
-          projects: []
-        });
+        // For legacy mode, also load full projects for detail panel
+        if (adapterState.mode === 'legacy') {
+          fetch('/data/projects.json')
+            .then((res) => res.json())
+            .then((data) => {
+              setLegacyProjects(data.projects);
+              setData({
+                generated_at: data.generated_at,
+                count: data.count,
+                projects: data.projects
+              });
+              console.log(`✓ Loaded ${data.projects.length} full projects for details`);
+            })
+            .catch((err) => console.error('Failed to load full projects:', err));
+        } else {
+          setData({
+            generated_at: adapterState.generatedAt,
+            count: adapterState.totalCount,
+            projects: []
+          });
+        }
       })
       .catch((err) => {
         console.error('Failed to initialize data:', err);
@@ -783,9 +799,11 @@ export default function Home() {
   const loadProjectDetail = async (item: IndexItem) => {
     if (!adapter) return;
     
-    const detail = await getProjectDetails(item.key, adapter.mode, []);
+    const detail = await getProjectDetails(item.key, adapter.mode, legacyProjects);
     if (detail) {
       setSelectedProject(detail);
+    } else {
+      console.warn(`Could not load details for ${item.key}`);
     }
   };
 
