@@ -132,8 +132,8 @@ function legacyToIndexItem(project: LegacyProject): IndexItem {
     updated_at: project.updated_at,
     tags_top: project.tags?.slice(0, 5) || [],
     license,
-    health_label: project.health?.health_label || 'unknown',
-    health_score: project.health_score || 0,
+    health_label: project.health?.health_label || 'steady',  // Default to 'steady' instead of 'unknown'
+    health_score: project.health_score || project.score || 50,  // Fallback to score or 50
     momentum_label: project.momentum?.momentum_label || 'flat',
     momentum_score: project.momentum?.momentum_score || 0,
     popularity: {
