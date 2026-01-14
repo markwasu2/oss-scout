@@ -90,10 +90,10 @@ def clamp(value, min_val=0, max_val=1):
     """Clamp value between min and max"""
     return max(min_val, min(max_val, value))
 
-def compute_momentum(current_metrics, previous_metrics):
+def compute_momentum(current_metrics, previous_metrics, weeks_elapsed=1.0):
     """
-    Compute momentum score and label from deltas
-    Returns dict with stars_delta, downloads_delta, likes_delta, momentum_score, momentum_label
+    Compute momentum v2 with breakout detection
+    Returns dict with deltas, per-week rates, normalized growth, and v2 labels
     """
     deltas = {
         'stars_delta': current_metrics.get('stars', 0) - previous_metrics.get('stars', 0),
@@ -102,8 +102,13 @@ def compute_momentum(current_metrics, previous_metrics):
         'likes_delta': current_metrics.get('likes', 0) - previous_metrics.get('likes', 0),
     }
     
-    # Compute momentum score (0-1) based on relative growth
-    # Use log1p to handle large deltas gracefully
+    # Per-week rates (Momentum v2)
+    stars_per_week = deltas['stars_delta'] / max(1, weeks_elapsed)
+    downloads_per_week = deltas['downloads_delta'] / max(1, weeks_elapsed)
+    likes_per_week = deltas['likes_delta'] / max(1, weeks_elapsed)
+    
+    # Normalized growth (relative to baseline, log-scaled for fairness)
+    # This makes small and large projects comparable
     if current_metrics.get('stars', 0) > 0:
         stars_momentum = log1p(abs(deltas['stars_delta'])) / log1p(max(1, current_metrics.get('stars', 1)))
     else:
@@ -119,13 +124,27 @@ def compute_momentum(current_metrics, previous_metrics):
     else:
         likes_momentum = 0
     
-    # Weighted average (GitHub: stars+forks, HF: downloads+likes)
+    # Normalized growth score (0-1)
     if current_metrics.get('source') == 'github':
+        normalized_growth = stars_momentum
         momentum_score = clamp(stars_momentum * 100)
     else:  # HuggingFace
-        momentum_score = clamp((downloads_momentum * 0.7 + likes_momentum * 0.3) * 100)
+        normalized_growth = downloads_momentum * 0.7 + likes_momentum * 0.3
+        momentum_score = clamp(normalized_growth * 100)
     
-    # Label based on score
+    # Momentum v2 labels (breakout detection)
+    baseline = current_metrics.get('stars', 0) or current_metrics.get('downloads', 0) or 0
+    
+    # Breakout: low baseline (<1000) + high normalized growth (>10%)
+    if baseline < 1000 and normalized_growth > 0.10:
+        momentum_label_v2 = 'breakout'
+    # Rising: sustained growth above median (>5%)
+    elif normalized_growth > 0.05:
+        momentum_label_v2 = 'rising'
+    else:
+        momentum_label_v2 = 'flat'
+    
+    # Legacy label for backward compat
     if momentum_score >= 5:
         momentum_label = 'rising'
     elif momentum_score >= 1:
@@ -136,7 +155,12 @@ def compute_momentum(current_metrics, previous_metrics):
     return {
         **deltas,
         'momentum_score': momentum_score,
-        'momentum_label': momentum_label
+        'momentum_label': momentum_label,  # v1
+        'stars_per_week': round(stars_per_week, 2),  # v2
+        'downloads_per_week': round(downloads_per_week, 2),  # v2
+        'likes_per_week': round(likes_per_week, 2),  # v2
+        'normalized_growth': round(normalized_growth, 4),  # v2
+        'momentum_label_v2': momentum_label_v2,  # v2
     }
 
 def extract_tags(text, topics, license_info=None):
@@ -462,7 +486,9 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         "days_since_release": None,
         "commits_30d": 0,
         "commits_90d": 0,
+        "contributors_30d": 0,  # Health v2
         "contributors_90d": 0,
+        "new_contributors_90d": 0,  # Health v2
         "prs_merged_60d": 0,
         "issues_opened_60d": 0,
         "issues_closed_60d": 0,
@@ -510,19 +536,51 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         except:
             pass
         
-        # 4. Contributors 90d (approximate from first page sample)
+        # 4. Contributors 90d + 30d + churn (Health v2)
         try:
+            # 90 days contributors
             url = f"https://api.github.com/repos/{repo_full_name}/commits?since={days_90_ago}&per_page=100&page=1"
             response = requests.get(url, headers=headers, timeout=10)
+            contributors_90d_set = set()
             if response.status_code == 200:
                 commits = response.json()
-                unique_authors = set()
                 for c in commits:
                     author_login = c.get("author", {}).get("login") if c.get("author") else None
                     if author_login:
-                        unique_authors.add(author_login)
-                health["contributors_90d"] = len(unique_authors)
+                        contributors_90d_set.add(author_login)
+                health["contributors_90d"] = len(contributors_90d_set)
+            
+            # 30 days contributors
+            url = f"https://api.github.com/repos/{repo_full_name}/commits?since={days_30_ago}&per_page=100&page=1"
+            response = requests.get(url, headers=headers, timeout=10)
+            contributors_30d_set = set()
+            if response.status_code == 200:
+                commits = response.json()
+                for c in commits:
+                    author_login = c.get("author", {}).get("login") if c.get("author") else None
+                    if author_login:
+                        contributors_30d_set.add(author_login)
+                health["contributors_30d"] = len(contributors_30d_set)
+            
+            # Contributor churn (new contributors as % of total in 90d)
+            # Get all-time contributors to identify "new" vs "returning"
+            try:
+                url = f"https://api.github.com/repos/{repo_full_name}/contributors?per_page=100&page=1"
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    all_contributors = {c.get("login") for c in response.json() if c.get("login")}
+                    # Rough heuristic: if contributor appears in recent but has few total contributions, likely new
+                    # For simplicity: count contributors_90d not in top 100 all-time as "new"
+                    # This is approximate but sufficient
+                    new_contributors_estimate = len(contributors_90d_set - (all_contributors if all_contributors else set()))
+                    health["new_contributors_90d"] = max(0, new_contributors_estimate)
+                else:
+                    health["new_contributors_90d"] = 0
+            except:
+                health["new_contributors_90d"] = 0
         except:
+            health["contributors_30d"] = 0
+            health["new_contributors_90d"] = 0
             pass
         
         # 5. PRs merged 60d + PR merge latency (Health v2)
@@ -611,11 +669,25 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
         # Exponential decay with genre-adaptive half-life (30 days for active projects)
         rec = clamp(pow(0.5, last_maint_event / 30.0))
         
-        # B) Activity: Merged PRs + Contributors (more robust than raw commits)
+        # B) Activity: Merged PRs + Contributors + Diversity (Health v2)
         # Normalize adaptively (75th percentile ~20 PRs, 15 contributors)
         pr_activity = clamp(log1p(health["prs_merged_60d"]) / log1p(20))
         contrib_activity = clamp(log1p(health["contributors_90d"]) / log1p(15))
-        activity = 0.6 * pr_activity + 0.4 * contrib_activity
+        
+        # Contributor diversity bonus (healthy churn rate ~10-30%)
+        if health["contributors_90d"] > 0:
+            churn_rate = health["new_contributors_90d"] / health["contributors_90d"]
+            # Optimal churn: 0.1-0.3 (healthy growth without instability)
+            if 0.1 <= churn_rate <= 0.3:
+                diversity_bonus = 1.0
+            elif churn_rate < 0.1:
+                diversity_bonus = 0.7 + (churn_rate / 0.1) * 0.3  # Low churn OK but not ideal
+            else:  # > 0.3
+                diversity_bonus = max(0.5, 1.0 - (churn_rate - 0.3) * 0.5)  # High churn = instability
+        else:
+            diversity_bonus = 0.5
+        
+        activity = 0.5 * pr_activity + 0.3 * contrib_activity + 0.2 * diversity_bonus
         
         # C) Responsiveness: Latency + Throughput (Health v2)
         # Reward fast response times, not just volume
@@ -905,7 +977,7 @@ def fetch_huggingface_models(config):
                     # Keep use_cases for backward compat
                     use_cases = [t for t in extracted_tags if t in ["agents", "inference", "eval", "training", "dataset", "rag"]]
                     
-                    # Extract HF-specific metadata
+                    # Extract HF-specific metadata (v1)
                     hf_metadata = {
                         "library": getattr(model, "library_name", None),
                         "pipeline_tag": getattr(model, "pipeline_tag", None),
@@ -914,6 +986,15 @@ def fetch_huggingface_models(config):
                         "architecture": None,
                         "datasets": [],
                         "paper": None
+                    }
+                    
+                    # HF v2: Enhanced vetting signals
+                    hf_v2 = {
+                        "architecture_family": None,
+                        "training_type": None,
+                        "eval_present": False,
+                        "benchmark_mentioned": False,
+                        "license_clarity": "unknown"
                     }
                     
                     # Try to get more metadata from cardData if available
@@ -928,12 +1009,43 @@ def fetch_huggingface_models(config):
                             hf_metadata["paper"] = card_data["arxiv"]
                         elif "paper" in card_data:
                             hf_metadata["paper"] = card_data["paper"]
+                        
+                        # HF v2: License clarity
+                        if hf_metadata["license"]:
+                            hf_v2["license_clarity"] = "explicit"
+                        elif hf_metadata["base_model"]:
+                            hf_v2["license_clarity"] = "inherited"
+                        
+                        # HF v2: Training type inference
+                        model_name_lower = model_id.lower()
+                        if "lora" in model_name_lower or "adapter" in model_name_lower:
+                            hf_v2["training_type"] = "lora"
+                        elif "finetune" in model_name_lower or "ft" in model_name_lower or hf_metadata["base_model"]:
+                            hf_v2["training_type"] = "finetune"
+                        else:
+                            hf_v2["training_type"] = "base"
+                        
+                        # HF v2: Eval/benchmark detection (simple keyword check)
+                        card_data_str = str(card_data).lower()
+                        if any(kw in card_data_str for kw in ["eval", "benchmark", "metric", "score", "test"]):
+                            hf_v2["eval_present"] = True
+                        if any(kw in card_data_str for kw in ["mmlu", "hellaswag", "winogrande", "arc", "truthfulqa", "fid", "clip score"]):
+                            hf_v2["benchmark_mentioned"] = True
                     
                     # Try to infer architecture from tags or model name
                     for tag in hf_tags_raw:
                         if any(arch in tag.lower() for arch in ["gpt", "llama", "mistral", "falcon", "bert", "t5", "vit", "clip", "sdxl", "stable-diffusion"]):
                             hf_metadata["architecture"] = tag
                             break
+                    
+                    # HF v2: Architecture family classification
+                    all_text = " ".join([model_id.lower()] + hf_tags_raw).lower()
+                    if any(kw in all_text for kw in ["diffusion", "stable-diffusion", "sdxl", "latent"]):
+                        hf_v2["architecture_family"] = "diffusion"
+                    elif any(kw in all_text for kw in ["transformer", "gpt", "llama", "mistral", "bert", "t5"]):
+                        hf_v2["architecture_family"] = "transformer"
+                    elif any(kw in all_text for kw in ["hybrid", "multimodal", "vlm", "vision-language"]):
+                        hf_v2["architecture_family"] = "hybrid"
                     
                     project = {
                         "source": "huggingface",
@@ -949,7 +1061,8 @@ def fetch_huggingface_models(config):
                         "days_since_update": days_since_update,
                         "tags": extracted_tags,  # New: comprehensive tag list
                         "use_cases": use_cases,  # Kept for backward compat
-                        "hf": hf_metadata,  # New: HF-specific metadata
+                        "hf": hf_metadata,  # v1: HF-specific metadata
+                        "hf_v2": hf_v2,  # v2: Enhanced vetting signals
                     }
                     
                     # Compute 3 scores
@@ -1047,28 +1160,25 @@ def save_projects(projects):
         # Get previous metrics
         previous_metrics = previous_snapshot.get(key, {})
         
-        # Compute momentum
-        momentum = compute_momentum(current_metrics, previous_metrics)
-        project['momentum'] = momentum
-        
-        # Compute growth rate (Health v2)
-        # Calculate stars/downloads per week if we have previous data
+        # Calculate weeks elapsed for momentum normalization
+        weeks_elapsed = 1.0
         if previous_metrics.get('fetched_at'):
             try:
                 prev_date = datetime.fromisoformat(previous_metrics['fetched_at'])
                 current_date = datetime.utcnow()
-                weeks_elapsed = max(1, (current_date - prev_date).days / 7.0)
-                
-                if project['source'] == 'github':
-                    stars_per_week = momentum['stars_delta'] / weeks_elapsed
-                    project['growth_rate_weekly'] = round(stars_per_week, 2)
-                else:  # HuggingFace
-                    downloads_per_week = momentum['downloads_delta'] / weeks_elapsed
-                    project['growth_rate_weekly'] = round(downloads_per_week, 2)
+                weeks_elapsed = max(1.0, (current_date - prev_date).days / 7.0)
             except:
-                project['growth_rate_weekly'] = 0.0
-        else:
-            project['growth_rate_weekly'] = 0.0
+                weeks_elapsed = 1.0
+        
+        # Compute momentum v2
+        momentum = compute_momentum(current_metrics, previous_metrics, weeks_elapsed)
+        project['momentum'] = momentum
+        
+        # Growth rate weekly (for backward compat and display)
+        if project['source'] == 'github':
+            project['growth_rate_weekly'] = momentum['stars_per_week']
+        else:  # HuggingFace
+            project['growth_rate_weekly'] = momentum['downloads_per_week']
         
         # Save to new snapshot
         new_snapshot[key] = {
