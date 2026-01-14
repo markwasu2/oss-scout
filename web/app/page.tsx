@@ -47,6 +47,7 @@ type Project = {
     issue_close_latency_days: number | null;  // Health v2
     health_score: number;
     health_label: 'alive' | 'steady' | 'decaying';
+    health_reason?: string;  // Health v3
   };
   momentum?: {
     stars_delta: number;
@@ -55,6 +56,7 @@ type Project = {
     likes_delta: number;
     momentum_score: number;
     momentum_label: 'rising' | 'steady' | 'flat';
+    momentum_reason?: string;  // Momentum v3
   };
   hf?: {
     library: string | null;
@@ -1185,6 +1187,22 @@ export default function Home() {
 
               {/* Description */}
               <p className="text-sm text-gray-700">{selectedProject.description}</p>
+
+              {/* Why/Reasons (Health v3 + Momentum v3) */}
+              {(selectedProject.health?.health_reason || selectedProject.momentum?.momentum_reason) && (
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded">
+                  {selectedProject.health?.health_reason && (
+                    <div className="text-xs text-gray-700 mb-1">
+                      <span className="font-semibold text-blue-900">Health:</span> {selectedProject.health.health_reason}
+                    </div>
+                  )}
+                  {selectedProject.momentum?.momentum_reason && (
+                    <div className="text-xs text-gray-700">
+                      <span className="font-semibold text-blue-900">Momentum:</span> {selectedProject.momentum.momentum_reason}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Scores */}
               <div className="space-y-2 text-xs">

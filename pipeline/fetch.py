@@ -153,6 +153,26 @@ def compute_momentum(current_metrics, previous_metrics, weeks_elapsed=1.0):
     else:
         momentum_label = 'flat'
     
+    # Generate explainable reason (Momentum v3)
+    momentum_reasons = []
+    
+    if momentum_label_v2 == 'breakout':
+        momentum_reasons.append(f"🚀 {normalized_growth*100:.0f}% growth")
+    elif momentum_label_v2 == 'rising':
+        momentum_reasons.append(f"📈 {normalized_growth*100:.0f}% growth")
+    
+    if stars_per_week > 10:
+        momentum_reasons.append(f"+{stars_per_week:.0f}⭐/wk")
+    elif stars_per_week > 1:
+        momentum_reasons.append(f"+{stars_per_week:.1f}⭐/wk")
+    
+    if downloads_per_week > 1000:
+        momentum_reasons.append(f"+{downloads_per_week/1000:.1f}k⬇️/wk")
+    elif downloads_per_week > 100:
+        momentum_reasons.append(f"+{downloads_per_week:.0f}⬇️/wk")
+    
+    momentum_reason = " • ".join(momentum_reasons[:3]) if momentum_reasons else "Stable"
+    
     return {
         **deltas,
         'momentum_score': momentum_score,
@@ -162,6 +182,7 @@ def compute_momentum(current_metrics, previous_metrics, weeks_elapsed=1.0):
         'likes_per_week': round(likes_per_week, 2),  # v2
         'normalized_growth': round(normalized_growth, 4),  # v2
         'momentum_label_v2': momentum_label_v2,  # v2
+        'momentum_reason': momentum_reason,  # v3
     }
 
 def extract_tags(text, topics, license_info=None):
@@ -755,6 +776,44 @@ def fetch_health_signals_comprehensive(repo_full_name, repo_pushed_at, cache):
             health["health_label"] = "steady"
         else:
             health["health_label"] = "decaying"
+        
+        # 9. Generate explainable reason (Health v3)
+        health_reasons = []
+        
+        # Recency
+        if health["days_since_push"] < 7:
+            health_reasons.append("active this week")
+        elif health["days_since_push"] < 30:
+            health_reasons.append(f"updated {health['days_since_push']}d ago")
+        
+        # Contributors
+        if health["contributors_90d"] >= 10:
+            health_reasons.append(f"{health['contributors_90d']} contributors")
+        elif health["contributors_90d"] >= 3:
+            health_reasons.append(f"team of {health['contributors_90d']}")
+        elif health["contributors_90d"] == 1:
+            health_reasons.append("⚠️ solo maintainer")
+        
+        # Responsiveness
+        if health.get("pr_merge_latency_days"):
+            pr_days = health["pr_merge_latency_days"]
+            if pr_days < 7:
+                health_reasons.append(f"PRs merged <7d")
+            elif pr_days > 30:
+                health_reasons.append(f"⚠️ PRs avg {pr_days:.0f}d")
+        
+        if health.get("issue_close_latency_days"):
+            issue_days = health["issue_close_latency_days"]
+            if issue_days > 60:
+                health_reasons.append(f"⚠️ issues avg {issue_days:.0f}d")
+        
+        # Activity
+        if health["prs_merged_60d"] >= 20:
+            health_reasons.append(f"{health['prs_merged_60d']} PRs/60d")
+        elif health["prs_merged_60d"] == 0:
+            health_reasons.append("no recent PRs")
+        
+        health["health_reason"] = " • ".join(health_reasons[:4]) if health_reasons else "No activity signals"
         
     except Exception as e:
         print(f"    ⚠ Health error for {repo_full_name}: {e}")
