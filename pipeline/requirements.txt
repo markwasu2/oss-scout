@@ -3,3 +3,4 @@ python-dotenv
 huggingface_hub
 python-dateutil
 networkx
+sentence-transformers

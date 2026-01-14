@@ -7,6 +7,7 @@ from pathlib import Path
 from time import sleep
 import re
 from math import log1p
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()  # 👈 THIS LINE IS THE KEY
 
@@ -1177,6 +1178,89 @@ def check_wedge_alerts(current_projects):
     with open(last_run_path, 'w') as f:
         json.dump({"projects": [{"id": p['id']} for p in current_projects]}, f)
 
+def generate_embeddings(projects):
+    """
+    Generate semantic embeddings for all projects using sentence-transformers.
+    Saves to data/embeddings.json for client-side similarity search.
+    """
+    print(f"\n🧠 Generating embeddings for {len(projects)} projects...")
+    
+    try:
+        # Load model (caches after first use)
+        model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        print(f"   Model: all-MiniLM-L6-v2 (384 dims)")
+        
+        # Build text representation for each project
+        texts = []
+        keys = []
+        
+        for p in projects:
+            # Combine relevant text fields
+            if p['source'] == 'github':
+                text_parts = [
+                    p.get('name', ''),
+                    p.get('full_name', '').split('/')[-1],  # org name
+                    p.get('description', ''),
+                    ' '.join(p.get('topics', [])),
+                    ' '.join(p.get('tags', [])),
+                ]
+            else:  # huggingface
+                text_parts = [
+                    p.get('id', ''),
+                    p.get('name', ''),
+                    p.get('description', ''),
+                    ' '.join(p.get('tags', [])),
+                ]
+                # Add HF-specific metadata
+                if p.get('hf'):
+                    hf = p['hf']
+                    if hf.get('pipeline_tag'):
+                        text_parts.append(hf['pipeline_tag'])
+                    if hf.get('library'):
+                        text_parts.append(hf['library'])
+                if p.get('hf_v2'):
+                    hf_v2 = p['hf_v2']
+                    if hf_v2.get('architecture_family'):
+                        text_parts.append(hf_v2['architecture_family'])
+            
+            text = ' '.join([t for t in text_parts if t]).strip()
+            texts.append(text)
+            keys.append(f"{p['source']}:{p['id']}")
+        
+        # Generate embeddings (batched automatically by sentence-transformers)
+        embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+        
+        # Save embeddings
+        output_dir = Path("data")
+        output_dir.mkdir(exist_ok=True)
+        embeddings_file = output_dir / "embeddings.json"
+        
+        # Format: array of {id, source, vec}
+        embeddings_data = []
+        for i, (key, emb) in enumerate(zip(keys, embeddings)):
+            source, proj_id = key.split(':', 1)
+            embeddings_data.append({
+                "id": proj_id,
+                "source": source,
+                "vec": emb.tolist()  # Convert numpy to list for JSON
+            })
+        
+        with open(embeddings_file, 'w') as f:
+            json.dump({
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "model": "sentence-transformers/all-MiniLM-L6-v2",
+                "dimensions": 384,
+                "count": len(embeddings_data),
+                "embeddings": embeddings_data
+            }, f)
+        
+        print(f"   ✓ Embeddings saved to {embeddings_file}")
+        print(f"   Size: {len(embeddings_data)} items × 384 dims")
+        
+    except Exception as e:
+        print(f"   ⚠️  Failed to generate embeddings: {e}")
+        print(f"   Semantic search will be disabled in UI")
+
 def save_projects(projects):
     """Save projects to data/projects.json with facets and momentum"""
     data_dir = Path("data")
@@ -1295,6 +1379,9 @@ if __name__ == "__main__":
         
         # Check for new matches in saved wedges
         check_wedge_alerts(all_projects)
+        
+        # Generate embeddings for semantic search
+        generate_embeddings(all_projects)
         
         print(f"\n✅ Pipeline completed successfully!")
         print(f"   Total: {len(all_projects)} items")

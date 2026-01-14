@@ -22,6 +22,18 @@ echo "▶ Copying data files to web/public/data/"
 mkdir -p web/public/data
 cp data/projects.json web/public/data/projects.json
 
+# Copy embeddings if exists
+if [ -f "data/embeddings.json" ]; then
+  cp data/embeddings.json web/public/data/embeddings.json
+  echo "   ✓ Copied embeddings.json"
+fi
+
+# Copy alerts if exists
+if [ -f "data/alerts.json" ]; then
+  cp data/alerts.json web/public/data/alerts.json
+  echo "   ✓ Copied alerts.json"
+fi
+
 echo "✅ Done."
 echo "   - data/projects.json"
 echo "   - web/public/data/projects.json"

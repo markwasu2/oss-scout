@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { embedQuery, loadEmbeddings, findTopSimilar, cosineSimilarity, type EmbeddingsData } from './lib/semantic';
 
 type Project = {
   source: string;
@@ -289,6 +290,12 @@ export default function Home() {
   const [showSaveWedgeModal, setShowSaveWedgeModal] = useState(false);
   const [newWedgeName, setNewWedgeName] = useState('');
   const [showWedgesPanel, setShowWedgesPanel] = useState(false);
+  const [semanticSearchEnabled, setSemanticSearchEnabled] = useState(false);
+  const [embeddingsData, setEmbeddingsData] = useState<EmbeddingsData | null>(null);
+  const [semanticQueryVec, setSemanticQueryVec] = useState<Float32Array | null>(null);
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [showSimilarProjects, setShowSimilarProjects] = useState(false);
+  const [similarProjects, setSimilarProjects] = useState<Project[]>([]);
 
   // Load saved wedges from localStorage
   useEffect(() => {
@@ -317,6 +324,41 @@ export default function Home() {
       .then((data) => setData(data))
       .catch((err) => console.error('Failed to load projects:', err));
   }, []);
+
+  // Load embeddings for semantic search
+  useEffect(() => {
+    loadEmbeddings().then((embeddings) => {
+      if (embeddings) {
+        setEmbeddingsData(embeddings);
+        console.log('✓ Semantic search ready');
+      }
+    });
+  }, []);
+
+  // Generate query embedding when semantic search is enabled and query changes
+  useEffect(() => {
+    if (!semanticSearchEnabled || !searchQuery || !embeddingsData) {
+      setSemanticQueryVec(null);
+      return;
+    }
+
+    const generateQueryEmbedding = async () => {
+      setSemanticLoading(true);
+      try {
+        const vec = await embedQuery(searchQuery);
+        setSemanticQueryVec(vec);
+      } catch (error) {
+        console.error('Failed to generate query embedding:', error);
+        setSemanticQueryVec(null);
+      } finally {
+        setSemanticLoading(false);
+      }
+    };
+
+    // Debounce embedding generation
+    const timeout = setTimeout(generateQueryEmbedding, 500);
+    return () => clearTimeout(timeout);
+  }, [semanticSearchEnabled, searchQuery, embeddingsData]);
 
   // Load alerts and update wedge match counts
   useEffect(() => {
@@ -421,16 +463,38 @@ export default function Home() {
     if (!data) return [];
 
     let filtered = data.projects;
+    let semanticScores: Map<string, number> | null = null;
 
-    // Search
+    // Search (semantic or keyword)
     if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (p) =>
-          p.name.toLowerCase().includes(q) ||
-          p.description.toLowerCase().includes(q) ||
-          p.topics.some((t) => t.toLowerCase().includes(q))
-      );
+      if (semanticSearchEnabled && semanticQueryVec && embeddingsData) {
+        // Semantic search: score by similarity
+        const embeddingsMap = new Map(
+          embeddingsData.embeddings.map((e) => [`${e.source}:${e.id}`, e.vec])
+        );
+
+        semanticScores = new Map();
+        filtered = filtered.filter((p) => {
+          const key = `${p.source}:${p.id}`;
+          const vec = embeddingsMap.get(key);
+          if (!vec) return false;
+
+          const similarity = cosineSimilarity(semanticQueryVec, vec);
+          semanticScores!.set(p.id, similarity);
+
+          // Filter threshold: only show items with similarity > 0.3
+          return similarity > 0.3;
+        });
+      } else {
+        // Keyword search
+        const q = searchQuery.toLowerCase();
+        filtered = filtered.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.description.toLowerCase().includes(q) ||
+            p.topics.some((t) => t.toLowerCase().includes(q))
+        );
+      }
     }
 
     // Source filter
@@ -502,6 +566,14 @@ export default function Home() {
 
     // Sort
     filtered = [...filtered].sort((a, b) => {
+      // If semantic search is active and we have scores, sort by similarity first
+      if (semanticScores && semanticScores.has(a.id) && semanticScores.has(b.id)) {
+        const simA = semanticScores.get(a.id)!;
+        const simB = semanticScores.get(b.id)!;
+        return simB - simA;
+      }
+
+      // Otherwise use selected sort
       if (sortBy === 'popularity') return b.popularity_score - a.popularity_score;
       if (sortBy === 'health') return b.health_score - a.health_score;
       if (sortBy === 'people') return b.people_score - a.people_score;
@@ -511,7 +583,7 @@ export default function Home() {
     });
 
     return filtered;
-  }, [data, searchQuery, sortBy, sourceFilter, healthFilter, useCaseFilter, tagFilters, contributorFilter, maxDaysOld, minStars, minContributors, activeLens, medianPopularity]);
+  }, [data, searchQuery, sortBy, sourceFilter, healthFilter, useCaseFilter, tagFilters, contributorFilter, maxDaysOld, minStars, minContributors, activeLens, medianPopularity, semanticSearchEnabled, semanticQueryVec, embeddingsData]);
 
   // Related projects (for selected project)
   const relatedProjects = useMemo(() => {
@@ -606,6 +678,36 @@ export default function Home() {
     setSavedWedges((prev) => prev.filter((w) => w.id !== wedgeId));
   };
 
+  // Find similar projects to the selected one
+  const findSimilar = async (project: Project) => {
+    if (!embeddingsData || !data) return;
+
+    const embeddingsMap = new Map(
+      embeddingsData.embeddings.map((e) => [`${e.source}:${e.id}`, e.vec])
+    );
+
+    const key = `${project.source}:${project.id}`;
+    const vec = embeddingsMap.get(key);
+    if (!vec) {
+      console.warn('No embedding found for', key);
+      return;
+    }
+
+    // Find similar projects
+    const similar = findTopSimilar(
+      vec,
+      data.projects.filter((p) => p.id !== project.id),
+      (p) => {
+        const pKey = `${p.source}:${p.id}`;
+        return embeddingsMap.get(pKey);
+      },
+      10
+    );
+
+    setSimilarProjects(similar.map((s) => s.item));
+    setShowSimilarProjects(true);
+  };
+
   if (!data) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -634,13 +736,29 @@ export default function Home() {
             </div>
 
             {/* Search */}
-            <input
-              type="text"
-              placeholder="Search projects..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="flex-1 min-w-[200px] px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+            <div className="flex-1 min-w-[200px] flex items-center gap-2">
+              <input
+                type="text"
+                placeholder={semanticSearchEnabled ? "Semantic search (e.g. 'voice cloning for anime')..." : "Search projects..."}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="flex-1 px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                disabled={semanticLoading}
+              />
+              {embeddingsData && (
+                <button
+                  onClick={() => setSemanticSearchEnabled(!semanticSearchEnabled)}
+                  className={`px-2 py-1.5 text-xs font-medium rounded transition-colors ${
+                    semanticSearchEnabled
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                  title={semanticSearchEnabled ? 'Using semantic search' : 'Use semantic search'}
+                >
+                  {semanticSearchEnabled ? '🧠' : '🔤'}
+                </button>
+              )}
+            </div>
 
             {/* Lens dropdown */}
             <select
@@ -982,22 +1100,32 @@ export default function Home() {
               <div>
                 <h2 className="font-bold text-gray-900 mb-1">{selectedProject.name}</h2>
                 <p className="text-xs text-gray-600 mb-3">{selectedProject.full_name}</p>
-                <a
-                  href={selectedProject.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block px-3 py-1 bg-black text-white rounded text-xs font-medium hover:bg-gray-800"
-                >
-                  Open {selectedProject.source === 'github' ? 'Repo' : 'Model'} →
-                </a>
-                {selectedProject.source === 'github' && (
+                <div className="flex flex-wrap gap-2">
                   <a
-                    href={`/graph?project=${encodeURIComponent(selectedProject.full_name)}`}
-                    className="inline-block ml-2 px-3 py-1 bg-white border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50"
+                    href={selectedProject.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-block px-3 py-1 bg-black text-white rounded text-xs font-medium hover:bg-gray-800"
                   >
-                    Graph
+                    Open {selectedProject.source === 'github' ? 'Repo' : 'Model'} →
                   </a>
-                )}
+                  {selectedProject.source === 'github' && (
+                    <a
+                      href={`/graph?project=${encodeURIComponent(selectedProject.full_name)}`}
+                      className="inline-block px-3 py-1 bg-white border border-gray-300 text-gray-700 rounded text-xs font-medium hover:bg-gray-50"
+                    >
+                      Graph
+                    </a>
+                  )}
+                  {embeddingsData && (
+                    <button
+                      onClick={() => findSimilar(selectedProject)}
+                      className="inline-block px-3 py-1 bg-purple-600 text-white rounded text-xs font-medium hover:bg-purple-700"
+                    >
+                      🧠 Find Similar
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Description */}
@@ -1207,8 +1335,48 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Similar projects (semantic) */}
+              {showSimilarProjects && similarProjects.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs font-semibold text-gray-900">🧠 Similar Projects</h3>
+                    <button
+                      onClick={() => setShowSimilarProjects(false)}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {similarProjects.map((similar) => (
+                      <button
+                        key={similar.id}
+                        onClick={() => {
+                          setSelectedProject(similar);
+                          setShowSimilarProjects(false);
+                        }}
+                        className="w-full p-2 border border-purple-200 rounded hover:border-purple-400 transition-colors text-left"
+                      >
+                        <div className="text-xs font-medium text-gray-900 truncate mb-1">
+                          {similar.name}
+                        </div>
+                        <div className="flex gap-1 flex-wrap">
+                          {(similar.tags ?? []).slice(0, 3).map((tag) => (
+                            <span key={tag} className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px]">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Related projects */}
-              {relatedProjects.length > 0 && (
+              {!showSimilarProjects && relatedProjects.length > 0 && (
                 <div>
                   <h3 className="text-xs font-semibold text-gray-900 mb-2">Related</h3>
                   <div className="space-y-2">
